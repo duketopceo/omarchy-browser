@@ -25,6 +25,7 @@ import { createKlavisRoutes } from './klavis'
 import { createMcpRoutes } from './mcp'
 import { createMcpManagerRoutes } from './mcp-manager'
 import { createOAuthRoutes } from './oauth'
+import { createOmarchyRoutes } from './omarchy'
 import { createProviderRoutes } from './provider'
 import { createProvidersRoutes } from './providers'
 import { createRefinePromptRoutes } from './refine-prompt'
@@ -90,6 +91,7 @@ export function createApiRoutes(deps: CreateApiRoutesDeps) {
       .route('/health', createHealthRoute({ browser }))
       .route('/shutdown', createShutdownRoute({ onShutdown }))
       .route('/status', createStatusRoute({ browser, activity }))
+      .route('/omarchy', createOmarchyRoutes())
       .route('/test-provider', createProviderRoutes({ browserosId }))
       .route('/refine-prompt', createRefinePromptRoutes({ browserosId }))
       .route('/oauth', oauthRoutes(tokenManager))

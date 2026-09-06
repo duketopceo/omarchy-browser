@@ -5,6 +5,7 @@ import {
   Compass,
   CreditCard,
   MessageSquare,
+  Monitor,
   Palette,
   Server,
 } from 'lucide-react'
@@ -75,6 +76,7 @@ const primarySettingsSections: NavSection[] = [
         icon: Palette,
       },
       { name: 'BrowserOS as MCP', to: '/settings/mcp', icon: Server },
+      { name: 'Omarchy', to: '/settings/omarchy', icon: Monitor },
       {
         name: 'Usage & Billing',
         to: '/settings/usage',

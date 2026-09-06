@@ -16,6 +16,7 @@ import { MCPSettingsPage } from '@/screens/mcp-settings/MCPSettingsPage'
 import { NewTabChat } from '@/screens/newtab/index/NewTabChat'
 import { NewTabLayout } from '@/screens/newtab/layout/NewTabLayout'
 import { Personalize } from '@/screens/newtab/personalize/Personalize'
+import { OmarchySettingsPage } from '@/screens/omarchy/OmarchySettingsPage'
 import { OnboardingAiPage } from '@/screens/onboarding-ai/OnboardingAiPage'
 import { ProfilePage } from '@/screens/profile/ProfilePage'
 import { ScheduledTasksPage } from '@/screens/scheduled-tasks/ScheduledTasksPage'
@@ -77,6 +78,7 @@ export const App: FC = () => {
             <Route path="ai" element={<AISettingsPage key="ai" />} />
             <Route path="chat" element={<LlmHubPage />} />
             <Route path="mcp" element={<MCPSettingsPage />} />
+            <Route path="omarchy" element={<OmarchySettingsPage />} />
             <Route path="customization" element={<CustomizationPage />} />
             <Route
               path="search"

@@ -28,6 +28,7 @@
       "version": "0.0.150",
       "dependencies": {
         "@ai-sdk/react": "^4.0.87",
+        "@browseros/omarchy": "workspace:*",
         "@browseros/server": "workspace:*",
         "@browseros/shared": "workspace:*",
         "@hookform/resolvers": "^5.9.1",
@@ -266,6 +267,7 @@
         "@browseros/browser-core": "workspace:*",
         "@browseros/browser-mcp": "workspace:*",
         "@browseros/cdp-protocol": "workspace:*",
+        "@browseros/omarchy": "workspace:*",
         "@browseros/shared": "workspace:*",
         "@hono/zod-validator": "^0.9.0",
         "@modelcontextprotocol/client": "^2.0.0",
@@ -386,6 +388,10 @@
         "@browseros/claw-api": "workspace:*",
         "openapi-fetch": "0.17.0",
       },
+    },
+    "packages/omarchy": {
+      "name": "@browseros/omarchy",
+      "version": "0.0.1",
     },
     "packages/onboarding-video": {
       "name": "@browseros/onboarding-video",
@@ -652,6 +658,8 @@
     "@browseros/claw-server-rust": ["@browseros/claw-server-rust@workspace:apps/claw-server-rust"],
 
     "@browseros/harness-integrations-rust": ["@browseros/harness-integrations-rust@workspace:crates/harness-integrations"],
+
+    "@browseros/omarchy": ["@browseros/omarchy@workspace:packages/omarchy"],
 
     "@browseros/onboarding-video": ["@browseros/onboarding-video@workspace:packages/onboarding-video"],
 

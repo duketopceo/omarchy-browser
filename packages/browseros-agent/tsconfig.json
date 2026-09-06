@@ -32,6 +32,7 @@
     { "path": "./packages/browser-core" },
     { "path": "./packages/browser-mcp" },
     { "path": "./packages/build-server-tools" },
+    { "path": "./packages/omarchy" },
     { "path": "./apps/server" }
   ],
   "include": [],
