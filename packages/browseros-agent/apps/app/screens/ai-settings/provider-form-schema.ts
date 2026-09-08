@@ -38,6 +38,7 @@ export const providerFormSchema = z
     sessionToken: z.string().optional(),
     reasoningEffort: z.string().optional(),
     reasoningSummary: z.enum(['auto', 'concise', 'detailed']).optional(),
+    storeInKeyring: z.boolean().optional(),
   })
   .superRefine((data, ctx) => {
     if (data.type === 'azure') {

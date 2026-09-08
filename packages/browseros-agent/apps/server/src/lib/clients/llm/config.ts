@@ -9,6 +9,7 @@
 import { LLM_PROVIDERS, type LLMConfig } from '@browseros/shared/schemas/llm'
 import { INLINED_ENV } from '../../../env'
 import { logger } from '../../logger'
+import { isOmasealRef, resolveOmaseal } from '../../secrets/omaseal'
 import { fetchBrowserOSConfig, getLLMConfigFromProvider } from '../gateway'
 import { getOAuthTokenManager } from '../oauth'
 import {
@@ -77,11 +78,33 @@ export async function resolveLLMConfig(
     return resolveBrowserOSConfig(config, browserosId)
   }
 
-  // All other providers: passthrough with model validation
+  // All other providers: resolve any OmaSeal references, then passthrough
   if (!config.model) {
     throw new Error(`model is required for ${config.provider} provider`)
   }
-  return config as ResolvedLLMConfig
+  const resolved = await resolveOmasealFields(config)
+  return resolved as ResolvedLLMConfig
+}
+
+const OMASEAL_CREDENTIAL_FIELDS = [
+  'apiKey',
+  'accessKeyId',
+  'secretAccessKey',
+  'sessionToken',
+] as const
+
+async function resolveOmasealFields(config: LLMConfig): Promise<LLMConfig> {
+  const resolved: LLMConfig = { ...config }
+  for (const field of OMASEAL_CREDENTIAL_FIELDS) {
+    const value = resolved[field]
+    if (typeof value === 'string' && isOmasealRef(value)) {
+      const secret = await resolveOmaseal(value)
+      if (secret !== null) {
+        resolved[field] = secret
+      }
+    }
+  }
+  return resolved
 }
 
 interface OAuthResolveOptions {

@@ -8,9 +8,11 @@ import { zValidator } from '@hono/zod-validator'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import {
+  CREDENTIAL_FIELDS,
   dbProviderStore,
   type ProviderStore,
 } from '../../lib/providers/provider-store'
+import { isOmasealRef, storeOmaseal } from '../../lib/secrets/omaseal'
 import type { Env } from '../types'
 
 const IdParamSchema = z.object({ providerId: z.string().min(1) })
@@ -40,6 +42,7 @@ const UpsertProviderSchema = z.object({
   reasoningEffort: z.string().nullish(),
   reasoningSummary: z.string().nullish(),
   createdAt: z.number().optional(),
+  storeInKeyring: z.boolean().optional(),
 })
 
 /**
@@ -73,7 +76,8 @@ export function createProvidersRoutes(options: { store?: ProviderStore } = {}) {
       .post('/import', zValidator('json', ImportProvidersSchema), async (c) => {
         const imported: string[] = []
         const skipped: string[] = []
-        for (const provider of c.req.valid('json').providers) {
+        for (const { storeInKeyring: _, ...provider } of c.req.valid('json')
+          .providers) {
           const saved = await store.insertIfAbsent(provider)
           ;(saved ? imported : skipped).push(provider.id)
         }
@@ -89,10 +93,40 @@ export function createProvidersRoutes(options: { store?: ProviderStore } = {}) {
         zValidator('param', IdParamSchema),
         zValidator('json', UpsertProviderSchema),
         async (c) => {
-          const provider = await store.upsert({
-            ...c.req.valid('json'),
-            id: c.req.valid('param').providerId,
-          })
+          const { providerId } = c.req.valid('param')
+          const { storeInKeyring, ...rest } = c.req.valid('json')
+
+          if (storeInKeyring) {
+            try {
+              for (const field of CREDENTIAL_FIELDS) {
+                const value = rest[field]
+                if (
+                  typeof value !== 'string' ||
+                  !value ||
+                  isOmasealRef(value)
+                ) {
+                  continue
+                }
+                rest[field] = await storeOmaseal(
+                  'browseros',
+                  `${providerId}/${field}`,
+                  value,
+                )
+              }
+            } catch (error) {
+              const message =
+                error instanceof Error ? error.message : String(error)
+              return c.json(
+                {
+                  error: 'Failed to store credentials in OmaSeal',
+                  detail: message,
+                },
+                503,
+              )
+            }
+          }
+
+          const provider = await store.upsert({ ...rest, id: providerId })
           return c.json({ provider })
         },
       )

@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { createProvidersRoutes } from '../../../src/api/routes/providers'
 import type { ProviderRow } from '../../../src/lib/db/schema'
 import type {
@@ -75,6 +78,35 @@ const body = {
 }
 
 describe('llm provider routes', () => {
+  const tempDirs: string[] = []
+
+  function createFakeOmaseal(failSet = false) {
+    const dir = mkdtempSync(join(tmpdir(), 'browseros-omaseal-test-'))
+    tempDirs.push(dir)
+    const scriptPath = join(dir, 'omaseal')
+    writeFileSync(
+      scriptPath,
+      `#!/bin/sh\nif [ "$1" = "set" ]; then cat > /dev/null; ${
+        failSet ? 'echo "locked" >&2; exit 1' : 'echo "ok"'
+      }; elif [ "$1" = "resolve" ]; then printf 'resolved-key'; fi\n`,
+    )
+    chmodSync(scriptPath, 0o755)
+    return scriptPath
+  }
+
+  beforeEach(() => {
+    delete process.env.OMASEAL_PATH
+  })
+
+  afterEach(() => {
+    delete process.env.OMASEAL_PATH
+    for (const dir of tempDirs) {
+      try {
+        rmSync(dir, { recursive: true, force: true })
+      } catch {}
+    }
+    tempDirs.length = 0
+  })
   it('lists providers', async () => {
     const routes = createProvidersRoutes(memoryStore([row()]))
     const response = await routes.request('/')
@@ -192,6 +224,40 @@ describe('llm provider routes', () => {
       accessKeyId: 'AKIA',
       secretAccessKey: 'secret',
       sessionToken: 'token',
+    })
+  })
+
+  it('stores credentials in OmaSeal when storeInKeyring is true', async () => {
+    const { store, rows } = memoryStore()
+    const routes = createProvidersRoutes({ store })
+    process.env.OMASEAL_PATH = createFakeOmaseal()
+
+    const response = await routes.request(`/${PROVIDER_ID}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...body, storeInKeyring: true }),
+    })
+
+    expect(response.status).toBe(200)
+    expect(rows.get(PROVIDER_ID)?.apiKey).toBe(
+      'omaseal://browseros/provider-1/apiKey',
+    )
+  })
+
+  it('returns 503 when OmaSeal storage fails', async () => {
+    const { store } = memoryStore()
+    const routes = createProvidersRoutes({ store })
+    process.env.OMASEAL_PATH = createFakeOmaseal(true)
+
+    const response = await routes.request(`/${PROVIDER_ID}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...body, storeInKeyring: true }),
+    })
+
+    expect(response.status).toBe(503)
+    expect(await response.json()).toMatchObject({
+      error: 'Failed to store credentials in OmaSeal',
     })
   })
 

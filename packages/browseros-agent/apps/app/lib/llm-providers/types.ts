@@ -71,6 +71,8 @@ export interface LlmProviderConfig {
   hasAccessKeyId?: boolean
   hasSecretAccessKey?: boolean
   hasSessionToken?: boolean
+  /** Set during a save to move credentials into OmaSeal. */
+  storeInKeyring?: boolean
 }
 
 /**

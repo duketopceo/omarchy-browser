@@ -9,7 +9,7 @@ import {
   XCircle,
 } from 'lucide-react'
 import { type FC, useEffect, useMemo, useRef, useState } from 'react'
-import { useForm } from 'react-hook-form'
+import { type Control, useForm } from 'react-hook-form'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
@@ -197,6 +197,41 @@ function isProviderTestable(input: {
   return true
 }
 
+interface StoreInKeyringFieldProps {
+  control: Control<ProviderFormValues>
+  providerType: ProviderType
+}
+
+function StoreInKeyringField({
+  control,
+  providerType,
+}: StoreInKeyringFieldProps) {
+  if (isCredentiallessProviderType(providerType)) return null
+  return (
+    <FormField
+      control={control}
+      name="storeInKeyring"
+      render={({ field }) => (
+        <FormItem className="flex flex-row items-start space-x-3 space-y-0">
+          <FormControl>
+            <Checkbox
+              checked={field.value}
+              onCheckedChange={(value) => field.onChange(value === true)}
+            />
+          </FormControl>
+          <div className="space-y-1 leading-none">
+            <FormLabel>Store credentials in OmaSeal</FormLabel>
+            <FormDescription>
+              Keep API keys in the Omarchy keyring instead of the BrowserOS
+              database.
+            </FormDescription>
+          </div>
+        </FormItem>
+      )}
+    />
+  )
+}
+
 export interface NewProviderDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -241,6 +276,7 @@ export const NewProviderDialog: FC<NewProviderDialogProps> = ({
         initialValues?.reasoningEffort ||
         defaultReasoningEffort(initialValues?.type),
       reasoningSummary: initialValues?.reasoningSummary || 'auto',
+      storeInKeyring: initialValues?.storeInKeyring ?? false,
     },
   })
 
@@ -388,6 +424,7 @@ export const NewProviderDialog: FC<NewProviderDialogProps> = ({
           initialValues.reasoningEffort ||
           defaultReasoningEffort(initialValues.type),
         reasoningSummary: initialValues.reasoningSummary || 'auto',
+        storeInKeyring: initialValues.storeInKeyring ?? false,
       })
     }
   }, [initialValues, form])
@@ -411,6 +448,7 @@ export const NewProviderDialog: FC<NewProviderDialogProps> = ({
         sessionToken: '',
         reasoningEffort: defaultReasoningEffort(defaultType),
         reasoningSummary: 'auto',
+        storeInKeyring: false,
       })
     }
     setTestResult(null)
@@ -882,6 +920,11 @@ export const NewProviderDialog: FC<NewProviderDialogProps> = ({
             </div>
 
             {renderProviderSpecificFields()}
+
+            <StoreInKeyringField
+              control={form.control}
+              providerType={watchedType}
+            />
 
             <FormField
               control={form.control}
