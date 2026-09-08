@@ -27,10 +27,14 @@ The first submittal is an upstream PR to `browseros-ai/BrowserOS` that lands a m
 - Cross-platform guards: if `hyprctl` or `HYPRLAND_INSTANCE_SIGNATURE` is missing, the API returns `{ available: false }` instead of crashing.
 - CI-affected verification: `bun run lint`, `bunx turbo run typecheck --affected`, `bun run fallow`.
 
-**Out of scope for the first submittal**
+**Out of scope for the upstream submittal (in scope for the fork)**
 
 - Full Hyprland config read/write, keybindings, network/VPN, snapshots, and bulk actions.
 - Chromium-level patches or the `packages/browseros` build.
+- The `omaseal` provider-key harness (OpenRouter main + OpenAI/Anthropic/Gemini/Groq/xAI; no Azure) — ships in the fork, not upstream.
+
+**Out of scope entirely**
+
 - Production packaging, OTA, or release workflows.
 
 ## Requirements traceability
@@ -54,6 +58,31 @@ The first submittal is an upstream PR to `browseros-ai/BrowserOS` that lands a m
 6. **First submittal is intentionally small.** A scaffold PR is easier to review, gets CLA/CI green, and establishes the integration boundary before adding every API.
 
 ## Implementation Units
+
+### IU-0 — AI provider keys and `omaseal` harness
+
+**Files**
+- `packages/browseros-agent/apps/app/lib/llm-providers/types.ts`
+- `packages/browseros-agent/apps/app/modules/llm-providers/llm-providers.helpers.ts`
+- `packages/browseros-agent/apps/app/screens/ai-settings/NewProviderDialog.tsx`
+- `packages/browseros-agent/apps/app/screens/ai-settings/provider-form-schema.ts`
+- `packages/browseros-agent/apps/server/src/api/routes/providers.ts`
+- `packages/browseros-agent/apps/server/src/lib/clients/llm/config.ts`
+- `packages/browseros-agent/apps/server/src/lib/providers/provider-store.ts`
+- `packages/browseros-agent/apps/server/src/lib/secrets/*`
+- `packages/browseros-agent/apps/server/tests/lib/secrets/*`
+- `packages/browseros-agent/apps/server/tests/api/routes/providers.test.ts`
+- `packages/browseros-agent/apps/server/tests/lib/clients/llm/config.test.ts`
+- `packages/browseros-agent/tools/dogfood/cmd/start.go`
+
+**What it does**
+Complete the uncommitted `omaseal` provider-key harness. OpenRouter is the main harness; the provider list already supports OpenAI, Anthropic, Gemini, Groq, xAI/Grok (Azure is excluded). Provider secrets are stored under `apps/server/src/lib/secrets/` and consumed by the LLM config + provider-store. This is fork-only work and ships alongside the Omarchy-first browser, but is **not** in the upstream PR.
+
+**Tests**
+- `packages/browseros-agent/apps/server/tests/api/routes/providers.test.ts`
+  - Provider CRUD endpoints handle OpenRouter and the supported provider list.
+- `packages/browseros-agent/apps/server/tests/lib/clients/llm/config.test.ts`
+  - LLM config resolves the correct model/provider combinations and rejects Azure.
 
 ### IU-1 — Generic desktop package
 
@@ -152,11 +181,12 @@ Before any PR is opened, the following must be green:
 
 | Phase | Work | Target |
 |---|---|---|
-| 0. Harden scaffold | Fix any type/lint issues in the existing `@browseros/omarchy` slice; add tests; run `bunx turbo run typecheck --affected`. | Today |
-| 1. Generic desktop package | Rename/refactor to `@browseros/desktop` + `@browseros/omarchy` implementation. | Today / tomorrow |
-| 2. Server route + UI | Add `/api/desktop/monitors` and `/settings/desktop`; keep `/api/omarchy` and `/settings/omarchy` as fork aliases. | Tomorrow |
-| 3. Verification | Run lint, typecheck, fallow, server tests; fix regressions. | Tomorrow |
-| 4. PR prep | Rebase, squash, write PR body, screenshot, sign CLA, open PR. | Tomorrow |
+| 0. `omaseal` harness | Commit and verify the provider-key harness (OpenRouter main, OpenAI/Anthropic/Gemini/Groq/xAI; no Azure). | Today |
+| 1. Harden scaffold | Fix any type/lint issues in the existing `@browseros/omarchy` slice; add tests; run `bunx turbo run typecheck --affected`. | Today |
+| 2. Generic desktop package | Rename/refactor to `@browseros/desktop` + `@browseros/omarchy` implementation. | Today / tomorrow |
+| 3. Server route + UI | Add `/api/desktop/monitors` and `/settings/desktop`; keep `/api/omarchy` and `/settings/omarchy` as fork aliases. | Tomorrow |
+| 4. Verification | Run lint, typecheck, fallow, server tests; fix regressions. | Tomorrow |
+| 5. PR prep | Rebase, squash, write PR body, screenshot, sign CLA, open PR. | Tomorrow |
 
 This is an aggressive timeline. If any CI check fails on the full repo because of pre-existing issues (e.g. app GraphQL codegen), scope the first submittal to the package + server route only and open a follow-up PR for the UI.
 
