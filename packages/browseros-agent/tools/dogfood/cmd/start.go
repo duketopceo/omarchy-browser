@@ -426,11 +426,24 @@ func clawServerCommand(configPath string) []string {
 
 func serverRuntimeEnv(base []string, cfg config.Config) []string {
 	env := make([]string, 0, len(base)+2)
+	localBin := filepath.Join(os.Getenv("HOME"), ".local", "bin")
+	pathSet := false
 	for _, entry := range base {
 		if strings.HasPrefix(entry, "BROWSEROS_DIR=") {
 			continue
 		}
+		if strings.HasPrefix(entry, "PATH=") {
+			pathSet = true
+			value := strings.TrimPrefix(entry, "PATH=")
+			if !strings.Contains(":"+value+":", ":"+localBin+":") {
+				value = localBin + ":" + value
+			}
+			entry = "PATH=" + value
+		}
 		env = append(env, entry)
+	}
+	if !pathSet {
+		env = append(env, "PATH="+localBin)
 	}
 	return append(env,
 		"NODE_ENV=development",

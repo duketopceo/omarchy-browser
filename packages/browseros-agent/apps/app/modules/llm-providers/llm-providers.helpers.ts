@@ -107,6 +107,7 @@ export function toProviderPayload(config: LlmProviderConfig) {
     region: config.region,
     reasoningEffort: config.reasoningEffort,
     reasoningSummary: config.reasoningSummary,
+    storeInKeyring: config.storeInKeyring,
     createdAt: config.createdAt,
   }
 }

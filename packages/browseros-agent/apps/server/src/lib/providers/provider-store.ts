@@ -133,7 +133,7 @@ async function getWithCredentials(id: string): Promise<ProviderRow | null> {
   return row ?? null
 }
 
-const CREDENTIAL_FIELDS = [
+export const CREDENTIAL_FIELDS = [
   'apiKey',
   'accessKeyId',
   'secretAccessKey',

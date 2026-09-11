@@ -5,7 +5,7 @@
  */
 
 import { afterEach, describe, expect, it } from 'bun:test'
-import { mkdtempSync } from 'node:fs'
+import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -24,6 +24,7 @@ describe('resolveLLMConfig', () => {
   afterEach(async () => {
     shutdownOAuth()
     closeDb()
+    delete process.env.OMASEAL_PATH
     await Promise.all(
       tempDirs.map((dir) => rm(dir, { recursive: true, force: true })),
     )
@@ -56,6 +57,33 @@ describe('resolveLLMConfig', () => {
       apiKey: 'access-token',
       upstreamProvider: 'openai',
       accountId: 'account-id',
+    })
+  })
+
+  it('resolves OmaSeal references for ordinary providers', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'browseros-llm-config-test-'))
+    tempDirs.push(dir)
+
+    const scriptPath = join(dir, 'omaseal')
+    writeFileSync(
+      scriptPath,
+      `#!/bin/sh\nif [ "$1" = "resolve" ]; then printf 'resolved-key'; elif [ "$1" = "set" ]; then cat > /dev/null; echo "ok"; fi\n`,
+    )
+    chmodSync(scriptPath, 0o755)
+    process.env.OMASEAL_PATH = scriptPath
+
+    const resolved = await resolveLLMConfig({
+      provider: LLM_PROVIDERS.OPENROUTER,
+      model: 'openrouter/model',
+      apiKey: 'omaseal://browseros/openrouter/apiKey',
+      baseUrl: 'https://openrouter.ai/api/v1',
+    })
+
+    expect(resolved).toMatchObject({
+      provider: LLM_PROVIDERS.OPENROUTER,
+      model: 'openrouter/model',
+      apiKey: 'resolved-key',
+      baseUrl: 'https://openrouter.ai/api/v1',
     })
   })
 })
