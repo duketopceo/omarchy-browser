@@ -86,4 +86,23 @@ describe('resolveLLMConfig', () => {
       baseUrl: 'https://openrouter.ai/api/v1',
     })
   })
+
+  it('fails closed when an OmaSeal reference cannot be resolved', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'browseros-llm-config-test-'))
+    tempDirs.push(dir)
+
+    const scriptPath = join(dir, 'omaseal')
+    writeFileSync(scriptPath, '#!/bin/sh\nexit 1\n')
+    chmodSync(scriptPath, 0o755)
+    process.env.OMASEAL_PATH = scriptPath
+
+    await expect(
+      resolveLLMConfig({
+        provider: LLM_PROVIDERS.OPENROUTER,
+        model: 'openrouter/model',
+        apiKey: 'omaseal://browseros/openrouter/apiKey',
+        baseUrl: 'https://openrouter.ai/api/v1',
+      }),
+    ).rejects.toThrow('Failed to resolve OmaSeal credential reference')
+  })
 })
