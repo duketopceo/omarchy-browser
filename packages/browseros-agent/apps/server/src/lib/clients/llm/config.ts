@@ -99,9 +99,14 @@ async function resolveOmasealFields(config: LLMConfig): Promise<LLMConfig> {
     const value = resolved[field]
     if (typeof value === 'string' && isOmasealRef(value)) {
       const secret = await resolveOmaseal(value)
-      if (secret !== null) {
-        resolved[field] = secret
+      // Fail closed: an unresolved reference must abort the request rather than
+      // reach the provider as a literal `omaseal://` credential.
+      if (secret === null) {
+        throw new Error(
+          `Failed to resolve OmaSeal credential reference for ${field}: ${value}`,
+        )
       }
+      resolved[field] = secret
     }
   }
   return resolved
