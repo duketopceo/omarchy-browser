@@ -42,3 +42,6 @@ packages/browseros/build/extensions/
 .devtools/
 .omc/
 .llm/
+
+# codebase-memory-mcp local index cache
+.codebase-memory/
