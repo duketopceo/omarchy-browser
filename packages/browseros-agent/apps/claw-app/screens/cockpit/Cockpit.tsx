@@ -1,24 +1,32 @@
-import { CockpitHero } from '@/components/cockpit/CockpitHero'
 import { CockpitOnboarding } from '@/components/cockpit/CockpitOnboarding'
-import { ProductHuntBanner } from '@/components/cockpit/ProductHuntBanner'
+import { InControlBar } from '@/components/cockpit/InControlBar'
+import { NeedsYouBanner } from '@/components/cockpit/NeedsYouBanner'
+import { PromoSlot, usePromoSlot } from '@/components/cockpit/PromoSlot'
 import { RecentActivity } from '@/components/cockpit/RecentActivity'
 import { RunningGrid } from '@/components/cockpit/RunningGrid'
-import { SavedStatsBand } from '@/components/cockpit/SavedStatsBand'
+import { SavingsCard } from '@/components/cockpit/SavingsCard'
 import { isUserFacingHarness } from '@/components/harness/harness.types'
+import { Page } from '@/components/layout/Page'
+import { PageHeader } from '@/components/layout/PageHeader'
 import { useSessions } from '@/modules/api/audit.hooks'
 import { useCockpitStats } from '@/modules/api/cockpit.hooks'
 import { useConnections } from '@/modules/api/connections.hooks'
 import { useCockpitData } from './cockpit.data'
+import { homeLede, partOfDay } from './cockpit.helpers'
+import { useCurrentHour, useHelpTakeover } from './cockpit.hooks'
 import { getOnboardingState } from './cockpit-onboarding.helpers'
 
 const ONBOARDING_PROBE_LIMIT = 1
 
 export function Cockpit() {
   const { sessions } = useCockpitData()
+  const takeover = useHelpTakeover(sessions)
+  const hour = useCurrentHour()
+  const promo = usePromoSlot()
 
   // When no live session is connected, these probes decide which onboarding
   // shell to show. Their stable keys are shared with RecentActivity and MCP.
-  const connections = useConnections()
+  const connections = useConnections({ refetchInterval: 5000 })
   const taskProbe = useSessions({
     variables: { limit: ONBOARDING_PROBE_LIMIT },
     // Scoped to the onboarding shells: poll every 4s while the
@@ -64,33 +72,55 @@ export function Cockpit() {
           hasActivity: hasHistoricalActivity,
         })
       : 'ready'
-  const shouldLoadStats =
-    probesResolved && state === 'ready' && !hasLiveSessions
   const stats = useCockpitStats({
-    enabled: shouldLoadStats,
+    enabled: probesResolved && state === 'ready',
+    refetchInterval: 60_000,
   })
 
   const content =
     state !== 'ready' ? (
-      <div className="mx-auto flex w-full max-w-[1040px] flex-col gap-8 px-8 pt-12 pb-16">
-        <ProductHuntBanner />
-        <CockpitOnboarding
-          state={state}
-          connectedHarnesses={connectedHarnesses}
-        />
-      </div>
+      <Page>
+        <CockpitOnboarding connectedHarnesses={connectedHarnesses} />
+      </Page>
     ) : (
-      <div className="mx-auto flex w-full max-w-[1040px] flex-col gap-8 px-8 pt-12 pb-16">
-        <CockpitHero />
-        {shouldLoadStats && stats.data?.hasMeasuredStats ? (
-          <SavedStatsBand stats={stats.data} />
-        ) : (
-          <RunningGrid sessions={sessions} />
-        )}
-        <ProductHuntBanner />
+      <Page>
+        <PromoSlot {...promo} />
+        <PageHeader
+          title={`Good ${partOfDay(hour)}`}
+          lede={homeLede(sessions, takeover.inControlSession)}
+        />
+        {/* Pulled up so the strip reads as part of the greeting, not the next section. */}
+        {stats.data && stats.data.allTime.sessionCount > 0 ? (
+          <SavingsCard stats={stats.data} className="-mt-3" />
+        ) : null}
+        <NeedsYouBanner
+          sessions={sessions}
+          onTakeOver={takeover.takeOver}
+          onStop={takeover.stop}
+          pendingTakeOverSessionId={takeover.pendingTakeOverSessionId}
+          cancelPendingSessionId={takeover.stopPendingSessionId}
+        />
+        <RunningGrid
+          sessions={sessions}
+          onTakeOver={takeover.takeOver}
+          takeOverPendingSessionId={takeover.pendingTakeOverSessionId}
+          inControlSessionId={takeover.inControlSession?.sessionId}
+        />
         <RecentActivity />
-      </div>
+      </Page>
     )
 
-  return <div className="flex min-h-screen flex-col">{content}</div>
+  return (
+    <>
+      {content}
+      {takeover.inControlSession && (
+        <InControlBar
+          session={takeover.inControlSession}
+          onHandBack={takeover.handBack}
+          onCancel={takeover.cancelControl}
+          isHandingBack={takeover.isHandingBack}
+        />
+      )}
+    </>
+  )
 }

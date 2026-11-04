@@ -1,14 +1,21 @@
 import type {
+  AgentSettings,
   AppendRecordingEventsResponse,
+  AuditAgentList,
   AuditCleanupResult,
   AuditRetention,
   AuditStorageState,
   CancelSessionResponse,
+  ClaudeDesktopExtension,
+  ClaudeDesktopInstallResult,
   CockpitStats,
   Connection,
   ConnectionList,
+  FeedbackInvitation,
   HealthResponse,
+  RecordFeedbackInviteRequest,
   RecordingMetadata,
+  ResolveHelpResponse,
   SessionDetail,
   SessionList,
   SessionScreenshotList,
@@ -17,11 +24,13 @@ import type {
   Skill,
   SkillCreate,
   SkillDetail,
+  SkillFlowSource,
   SkillList,
   SkillRunList,
   SkillUpdate,
   SystemInfo,
   TelemetryState,
+  UpdateAgentSettingsRequest,
 } from '@browseros/claw-api'
 import createClient, { type Client } from 'openapi-fetch'
 import { ApiResponseError } from './errors'
@@ -121,8 +130,32 @@ export class ClawApiClient {
     return this.unwrap(await this.client.GET('/api/v1/cockpit/stats'))
   }
 
+  async getFeedbackInvitation(): Promise<FeedbackInvitation> {
+    return this.unwrap(await this.client.GET('/api/v1/feedback/invitation'))
+  }
+
+  async recordFeedbackInvite(
+    body: RecordFeedbackInviteRequest,
+  ): Promise<FeedbackInvitation> {
+    return this.unwrap(
+      await this.client.POST('/api/v1/feedback/invitation', { body }),
+    )
+  }
+
   async getTelemetry(): Promise<TelemetryState> {
     return this.unwrap(await this.client.GET('/api/v1/settings/telemetry'))
+  }
+
+  async getAgentSettings(): Promise<AgentSettings> {
+    return this.unwrap(await this.client.GET('/api/v1/settings/agent'))
+  }
+
+  async updateAgentSettings(
+    body: UpdateAgentSettingsRequest,
+  ): Promise<AgentSettings> {
+    return this.unwrap(
+      await this.client.PUT('/api/v1/settings/agent', { body }),
+    )
   }
 
   async getAuditStorage(): Promise<AuditStorageState> {
@@ -139,6 +172,10 @@ export class ClawApiClient {
 
   async runAuditCleanup(): Promise<AuditCleanupResult> {
     return this.unwrap(await this.client.POST('/api/v1/audit/cleanup'))
+  }
+
+  async listAuditAgents(): Promise<AuditAgentList> {
+    return this.unwrap(await this.client.GET('/api/v1/audit/agents'))
   }
 
   async updateTelemetry(
@@ -171,6 +208,17 @@ export class ClawApiClient {
     return this.unwrap(
       await this.client.POST('/api/v1/sessions/{sessionId}/cancel', {
         params: { path: request },
+      }),
+    )
+  }
+
+  async resolveHelp(
+    request: SessionRequest & { note?: string },
+  ): Promise<ResolveHelpResponse> {
+    return this.unwrap(
+      await this.client.POST('/api/v1/sessions/{sessionId}/help/resolve', {
+        params: { path: { sessionId: request.sessionId } },
+        body: { note: request.note },
       }),
     )
   }
@@ -217,8 +265,10 @@ export class ClawApiClient {
       await this.client.GET('/api/v1/sessions/{sessionId}/preview', {
         params: {
           path: { sessionId: request.sessionId },
-          query:
-            request.refresh === undefined ? {} : { refresh: request.refresh },
+          query: {
+            refresh: request.refresh,
+            browserTabId: request.browserTabId,
+          },
         },
         parseAs: 'blob',
       }),
@@ -269,6 +319,18 @@ export class ClawApiClient {
     )
   }
 
+  async getClaudeDesktopExtension(): Promise<ClaudeDesktopExtension> {
+    return this.unwrap(
+      await this.client.GET('/api/v1/claude-desktop/extension'),
+    )
+  }
+
+  async installClaudeDesktopExtension(): Promise<ClaudeDesktopInstallResult> {
+    return this.unwrap(
+      await this.client.POST('/api/v1/claude-desktop/extension/install'),
+    )
+  }
+
   async listSkills(): Promise<SkillList> {
     return this.unwrap(await this.client.GET('/api/v1/skills'))
   }
@@ -307,6 +369,22 @@ export class ClawApiClient {
     return this.unwrap(
       await this.client.GET('/api/v1/skills/{name}/runs', {
         params: { path: { name }, query },
+      }),
+    )
+  }
+
+  async getSkillFlow(request: SkillNameRequest): Promise<SkillFlowSource> {
+    return this.unwrap(
+      await this.client.GET('/api/v1/skills/{name}/flow', {
+        params: { path: request },
+      }),
+    )
+  }
+
+  async approveSkillWrite(request: SkillNameRequest): Promise<Skill> {
+    return this.unwrap(
+      await this.client.POST('/api/v1/skills/{name}/ultrafast/approve-write', {
+        params: { path: request },
       }),
     )
   }

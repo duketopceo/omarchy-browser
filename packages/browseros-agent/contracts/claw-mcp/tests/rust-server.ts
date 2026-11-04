@@ -71,6 +71,7 @@ async function sandboxEnv(root: string): Promise<Record<string, string>> {
     LOCALAPPDATA: join(home, 'AppData', 'Local'),
     BROWSERCLAW_DIR: join(root, 'browserclaw'),
     BROWSEROS_DIR: join(root, 'browseros'),
+    BROWSEROS_OUTPUT_DIR: join(root, 'browseros', 'tool-output'),
     CLAW_ANALYTICS_ENABLED: 'false',
   }
 }
@@ -132,6 +133,7 @@ async function startServer(
   cmd: string[],
   cdpPort: number,
   tmpPrefix: string,
+  env: NodeJS.ProcessEnv = {},
 ): Promise<ContractServer> {
   const root = await mkdtemp(join(tmpdir(), tmpPrefix))
   const serverPort = await findFreePort()
@@ -139,7 +141,7 @@ async function startServer(
   const child = Bun.spawn({
     cmd: [...cmd, '--config', sidecar],
     cwd: MONOREPO_ROOT,
-    env: await sandboxEnv(root),
+    env: { ...(await sandboxEnv(root)), ...env },
     stdout: 'pipe',
     stderr: 'pipe',
   }) as Bun.Subprocess<'ignore', 'pipe', 'pipe'>
@@ -161,7 +163,11 @@ async function startServer(
 
 export const RUST_BINARY = resolve(
   MONOREPO_ROOT,
-  'target/debug/browseros-claw-server-rs',
+  process.env.CLAW_SERVER_BINARY ??
+    join(
+      process.env.CARGO_TARGET_DIR ?? 'target',
+      'debug/browseros-claw-server-rs',
+    ),
 )
 
 /**
@@ -170,23 +176,27 @@ export const RUST_BINARY = resolve(
  */
 export function buildRustServer(): void {
   const build = Bun.spawnSync({
-    cmd: ['cargo', 'build', '--locked', '-p', 'claw-server-rust'],
+    cmd: ['cargo', 'build', '--locked', '-p', 'claw-server'],
     cwd: MONOREPO_ROOT,
     stdout: 'inherit',
     stderr: 'inherit',
   })
   if (build.exitCode !== 0) {
-    throw new Error(
-      `cargo build -p claw-server-rust failed (${build.exitCode})`,
-    )
+    throw new Error(`cargo build -p claw-server failed (${build.exitCode})`)
   }
 }
 
 export async function startRustServer(
   cdpPort: number,
+  options: { env?: NodeJS.ProcessEnv } = {},
 ): Promise<ContractServer> {
   if (!(await Bun.file(RUST_BINARY).exists())) {
     buildRustServer()
   }
-  return await startServer([RUST_BINARY], cdpPort, 'claw-mcp-rust-')
+  return await startServer(
+    [RUST_BINARY],
+    cdpPort,
+    'claw-mcp-rust-',
+    options.env,
+  )
 }

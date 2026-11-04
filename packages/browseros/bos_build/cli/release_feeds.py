@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Feed-publisher release commands."""
 
+from pathlib import Path
 from typing import List
 
 import typer
@@ -89,6 +90,9 @@ def appcast_command(
         "--workflow-run-attempt",
         help="Require release metadata from this Actions run attempt",
     ),
+    linux_arch: str | None = typer.Option(
+        None, "--linux-arch", help="Expected Linux artifact set: x64, arm64, or all"
+    ),
 ):
     """Generate browser appcasts from R2 release metadata."""
     ctx = _create_context(version, product)
@@ -100,6 +104,7 @@ def appcast_command(
             allow_downgrade=allow_downgrade,
             platforms=platforms,
             macos_arch=macos_arch,
+            linux_arch=linux_arch,
             source_sha=source_sha,
             workflow_run_id=workflow_run_id,
             workflow_run_attempt=workflow_run_attempt,
@@ -125,6 +130,12 @@ def extensions_command(
     allow_downgrade: bool = typer.Option(
         False, "--allow-downgrade", help="Override the version-downgrade guard"
     ),
+    baseline_root: Path | None = typer.Option(
+        None,
+        "--baseline-root",
+        help="Committed updates/ directory to preserve alongside live pins; "
+        "hold the feed publication lock through render, commit, and publish",
+    ),
 ):
     """Regenerate extension manifests coherently."""
     try:
@@ -141,6 +152,7 @@ def extensions_command(
             set_versions=versions,
             publish=publish,
             allow_downgrade=allow_downgrade,
+            baseline_root=baseline_root,
         ),
     )
 

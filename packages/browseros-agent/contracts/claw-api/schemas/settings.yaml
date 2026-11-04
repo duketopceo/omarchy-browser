@@ -16,3 +16,28 @@ UpdateTelemetryRequest:
   properties:
     consent:
       type: boolean
+AgentSettings:
+  type: object
+  description: User settings for the tools BrowserOS neo offers to agents.
+  additionalProperties: false
+  required: [humanHelpEnabled, taskCleanupTipEnabled]
+  properties:
+    humanHelpEnabled:
+      type: boolean
+      description: >-
+        Whether agents are offered request_human_help and await_human_help. When false, agents
+        are told to report a block in their own chat instead.
+    taskCleanupTipEnabled:
+      type: boolean
+      description: Whether successful MCP tool replies include a tip to close the task's tab group when finished.
+UpdateAgentSettingsRequest:
+  type: object
+  additionalProperties: false
+  minProperties: 1
+  properties:
+    humanHelpEnabled:
+      type: boolean
+      description: Omit to preserve the saved human help preference.
+    taskCleanupTipEnabled:
+      type: boolean
+      description: Omit to preserve the saved cleanup tip preference.

@@ -6,22 +6,36 @@ info:
 servers:
   - url: http://127.0.0.1:9200
 paths:
+  /system/diagnostics:
+    $ref: ./paths/system.yaml#/diagnostics
   /system/health:
     $ref: ./paths/system.yaml#/health
+  /system/ready:
+    $ref: ./paths/system.yaml#/ready
   /system/shutdown:
     $ref: ./paths/system.yaml#/shutdown
+  /api/v1/extension/update-ready:
+    $ref: ./paths/system.yaml#/extensionUpdateReady
   /api/v1/system:
     $ref: ./paths/system.yaml#/info
   /api/v1/cockpit/stats:
     $ref: ./paths/cockpit.yaml#/stats
+  /api/v1/feedback/invitation:
+    $ref: ./paths/feedback.yaml#/invitation
   /api/v1/settings/telemetry:
     $ref: ./paths/settings.yaml#/telemetry
+  /api/v1/settings/agent:
+    $ref: ./paths/settings.yaml#/agent
+  /api/v1/help/events:
+    $ref: ./paths/sessions.yaml#/helpEvents
   /api/v1/sessions:
     $ref: ./paths/sessions.yaml#/collection
   /api/v1/sessions/{sessionId}:
     $ref: ./paths/sessions.yaml#/detail
   /api/v1/sessions/{sessionId}/cancel:
     $ref: ./paths/sessions.yaml#/cancel
+  /api/v1/sessions/{sessionId}/help/resolve:
+    $ref: ./paths/sessions.yaml#/resolveHelp
   /api/v1/sessions/{sessionId}/recording:
     $ref: ./paths/recordings.yaml#/metadata
   /api/v1/sessions/{sessionId}/recording/events:
@@ -38,18 +52,28 @@ paths:
     $ref: ./paths/connections.yaml#/collection
   /api/v1/connections/{harness}:
     $ref: ./paths/connections.yaml#/harness
+  /api/v1/claude-desktop/extension:
+    $ref: ./paths/claude_desktop.yaml#/extension
+  /api/v1/claude-desktop/extension/install:
+    $ref: ./paths/claude_desktop.yaml#/install
   /api/v1/audit/storage:
     $ref: ./paths/audit.yaml#/storage
   /api/v1/audit/retention:
     $ref: ./paths/audit.yaml#/retention
   /api/v1/audit/cleanup:
     $ref: ./paths/audit.yaml#/cleanup
+  /api/v1/audit/agents:
+    $ref: ./paths/audit.yaml#/agents
   /api/v1/skills:
     $ref: ./paths/skills.yaml#/collection
   /api/v1/skills/{name}:
     $ref: ./paths/skills.yaml#/item
   /api/v1/skills/{name}/runs:
     $ref: ./paths/skills.yaml#/runs
+  /api/v1/skills/{name}/flow:
+    $ref: ./paths/skills.yaml#/flow
+  /api/v1/skills/{name}/ultrafast/approve-write:
+    $ref: ./paths/skills.yaml#/approveWrite
   /api/v1/directory:
     $ref: ./paths/skills.yaml#/directory
   /api/v1/directory/{name}:
@@ -92,20 +116,42 @@ components:
       $ref: ./schemas/common.yaml#/ApiError
     HealthResponse:
       $ref: ./schemas/system.yaml#/HealthResponse
+    BrowserLink:
+      $ref: ./schemas/system.yaml#/BrowserLink
     ShutdownResponse:
       $ref: ./schemas/system.yaml#/ShutdownResponse
+    SystemDiagnostics:
+      $ref: ./schemas/system.yaml#/SystemDiagnostics
     SystemInfo:
       $ref: ./schemas/system.yaml#/SystemInfo
     SystemCapabilities:
       $ref: ./schemas/system.yaml#/SystemCapabilities
+    SchemaStatus:
+      $ref: ./schemas/system.yaml#/SchemaStatus
+    ScreencastWatch:
+      $ref: ./schemas/screencasts.yaml#/ScreencastWatch
+    ScreencastWatchMessage:
+      $ref: ./schemas/screencasts.yaml#/ScreencastWatchMessage
+    ScreencastFrameHeader:
+      $ref: ./schemas/screencasts.yaml#/ScreencastFrameHeader
     CockpitStats:
       $ref: ./schemas/cockpit.yaml#/CockpitStats
     CockpitStatsWindow:
       $ref: ./schemas/cockpit.yaml#/CockpitStatsWindow
+    FeedbackInviteOutcome:
+      $ref: ./schemas/feedback.yaml#/FeedbackInviteOutcome
+    FeedbackInvitation:
+      $ref: ./schemas/feedback.yaml#/FeedbackInvitation
+    RecordFeedbackInviteRequest:
+      $ref: ./schemas/feedback.yaml#/RecordFeedbackInviteRequest
     TelemetryState:
       $ref: ./schemas/settings.yaml#/TelemetryState
     UpdateTelemetryRequest:
       $ref: ./schemas/settings.yaml#/UpdateTelemetryRequest
+    AgentSettings:
+      $ref: ./schemas/settings.yaml#/AgentSettings
+    UpdateAgentSettingsRequest:
+      $ref: ./schemas/settings.yaml#/UpdateAgentSettingsRequest
     SessionStatus:
       $ref: ./schemas/sessions.yaml#/SessionStatus
     LiveSessionActivityState:
@@ -130,6 +176,14 @@ components:
       $ref: ./schemas/dispatches.yaml#/Dispatch
     CancelSessionResponse:
       $ref: ./schemas/sessions.yaml#/CancelSessionResponse
+    HelpRequestKind:
+      $ref: ./schemas/sessions.yaml#/HelpRequestKind
+    HelpRequest:
+      $ref: ./schemas/sessions.yaml#/HelpRequest
+    ResolveHelpRequest:
+      $ref: ./schemas/sessions.yaml#/ResolveHelpRequest
+    ResolveHelpResponse:
+      $ref: ./schemas/sessions.yaml#/ResolveHelpResponse
     RecordingMetadata:
       $ref: ./schemas/recordings.yaml#/RecordingMetadata
     RecordingTabMetadata:
@@ -146,6 +200,12 @@ components:
       $ref: ./schemas/connections.yaml#/Connection
     ConnectionList:
       $ref: ./schemas/connections.yaml#/ConnectionList
+    ClaudeDesktopExtension:
+      $ref: ./schemas/claude_desktop.yaml#/ClaudeDesktopExtension
+    ClaudeDesktopInstallStatus:
+      $ref: ./schemas/claude_desktop.yaml#/ClaudeDesktopInstallStatus
+    ClaudeDesktopInstallResult:
+      $ref: ./schemas/claude_desktop.yaml#/ClaudeDesktopInstallResult
     AuditRetentionMode:
       $ref: ./schemas/audit.yaml#/AuditRetentionMode
     AuditRetention:
@@ -158,6 +218,10 @@ components:
       $ref: ./schemas/audit.yaml#/SetAuditRetentionRequest
     AuditCleanupResult:
       $ref: ./schemas/audit.yaml#/AuditCleanupResult
+    AuditAgent:
+      $ref: ./schemas/audit.yaml#/AuditAgent
+    AuditAgentList:
+      $ref: ./schemas/audit.yaml#/AuditAgentList
     SkillOrigin:
       $ref: ./schemas/skills.yaml#/SkillOrigin
     Skill:
@@ -172,6 +236,14 @@ components:
       $ref: ./schemas/skills.yaml#/SkillDetail
     SkillTokenSavings:
       $ref: ./schemas/skills.yaml#/SkillTokenSavings
+    SkillUltrafastStatus:
+      $ref: ./schemas/skills.yaml#/SkillUltrafastStatus
+    SkillUltrafast:
+      $ref: ./schemas/skills.yaml#/SkillUltrafast
+    SkillFlowSource:
+      $ref: ./schemas/skills.yaml#/SkillFlowSource
+    SkillRunMode:
+      $ref: ./schemas/skills.yaml#/SkillRunMode
     SkillCreate:
       $ref: ./schemas/skills.yaml#/SkillCreate
     SkillUpdate:

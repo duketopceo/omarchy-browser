@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -91,7 +92,7 @@ func TestBuildWatchEnvSelectsBrowserOSProduct(t *testing.T) {
 		CDP:       9012,
 		Server:    9123,
 		Extension: 9321,
-	}, "/tmp/browseros-dev", false)
+	}, "/tmp/browseros-dev", false, false)
 	if err != nil {
 		t.Fatalf("buildWatchEnv returned error: %v", err)
 	}
@@ -115,7 +116,7 @@ func TestBuildWatchEnvSelectsBrowserClawProduct(t *testing.T) {
 		CDP:       9012,
 		Server:    9123,
 		Extension: 9321,
-	}, "/tmp/browseros-dev", true, browser.BinaryResolution{
+	}, "/tmp/browseros-dev", true, false, browser.BinaryResolution{
 		Product:       browser.ProductBrowserClaw,
 		Path:          browser.BrowserClawBinaryPath,
 		PreferredPath: browser.BrowserClawBinaryPath,
@@ -162,7 +163,7 @@ func TestBuildWatchEnvUsesFallbackBrowserBinaryForClaw(t *testing.T) {
 	env, err := buildWatchEnvWithBinaryResolution(proc.Ports{
 		CDP:    9012,
 		Server: 9123,
-	}, "/tmp/browseros-dev", true, browser.BinaryResolution{
+	}, "/tmp/browseros-dev", true, false, browser.BinaryResolution{
 		Product:       browser.ProductBrowserClaw,
 		Path:          browser.BrowserOSBinaryPath,
 		PreferredPath: browser.BrowserClawBinaryPath,
@@ -180,7 +181,7 @@ func TestBuildWatchEnvUsesFallbackBrowserBinaryForClaw(t *testing.T) {
 func TestBuildWatchEnvHonorsAndNormalizesProductStateOverrides(t *testing.T) {
 	browserosRoot := filepath.Join(t.TempDir(), "browseros-state")
 	t.Setenv("BROWSEROS_DIR", browserosRoot)
-	browserosEnv, err := buildWatchEnv(proc.Ports{CDP: 9012, Server: 9123}, "/tmp/profile", false)
+	browserosEnv, err := buildWatchEnv(proc.Ports{CDP: 9012, Server: 9123}, "/tmp/profile", false, false)
 	if err != nil {
 		t.Fatalf("buildWatchEnv returned error: %v", err)
 	}
@@ -194,6 +195,7 @@ func TestBuildWatchEnvHonorsAndNormalizesProductStateOverrides(t *testing.T) {
 		proc.Ports{CDP: 9012, Server: 9123},
 		"/tmp/profile",
 		true,
+		false,
 		browser.BinaryResolution{Path: browser.BrowserClawBinaryPath},
 	)
 	if err != nil {
@@ -227,7 +229,7 @@ func TestClawRustServerProcConfigPassesSidecarAndDevEnv(t *testing.T) {
 		Server:    9123,
 		Extension: 9321,
 	}
-	env, err := buildWatchEnv(ports, userDataDir, true)
+	env, err := buildWatchEnv(ports, userDataDir, true, false)
 	if err != nil {
 		t.Fatalf("buildWatchEnv returned error: %v", err)
 	}
@@ -237,7 +239,7 @@ func TestClawRustServerProcConfigPassesSidecarAndDevEnv(t *testing.T) {
 		return nil
 	})
 
-	wantCmd := []string{"cargo", "run", "-p", "claw-server-rust", "--", "--config", sidecarPath}
+	wantCmd := []string{"cargo", "run", "-p", "claw-server", "--", "--config", sidecarPath}
 	if !reflect.DeepEqual(cfg.Cmd, wantCmd) {
 		t.Fatalf("expected rust server command %#v, got %#v", wantCmd, cfg.Cmd)
 	}
@@ -279,23 +281,55 @@ func TestClawRustServerProcConfigPassesSidecarAndDevEnv(t *testing.T) {
 			Resources string `json:"resources"`
 			Execution string `json:"execution"`
 		} `json:"directories"`
+		Flags struct {
+			DevMode *bool `json:"devMode"`
+		} `json:"flags"`
 	}
 	if err := json.Unmarshal(raw, &sidecar); err != nil {
 		t.Fatalf("parsing sidecar: %v", err)
 	}
+	if sidecar.Flags.DevMode == nil || !*sidecar.Flags.DevMode {
+		t.Fatalf("expected the dev claw sidecar to declare devMode, got %s", raw)
+	}
 	if sidecar.Ports.Server != ports.Server || sidecar.Ports.CDP != ports.CDP || sidecar.Ports.Proxy != ports.Server {
 		t.Fatalf("expected sidecar ports server=%d cdp=%d proxy=%d, got %+v", ports.Server, ports.CDP, ports.Server, sidecar.Ports)
 	}
-	if sidecar.Directories.Resources != filepath.Join(root, "apps/claw-server-rust/resources") || sidecar.Directories.Execution != userDataDir {
+	if sidecar.Directories.Resources != filepath.Join(root, "apps/claw-server/resources") || sidecar.Directories.Execution != userDataDir {
 		t.Fatalf("unexpected sidecar directories: %+v", sidecar.Directories)
+	}
+}
+
+func TestClawRustServerBuildsInItsOwnCargoDir(t *testing.T) {
+	root := t.TempDir()
+	ownDir := filepath.Join(root, "target", "dev-watch")
+	for _, tc := range []struct {
+		env        []string
+		wantTarget string
+		wantBuild  string
+	}{
+		{[]string{"PATH=/bin"}, ownDir, ownDir},
+		{[]string{"CARGO_TARGET_DIR=/ssd/target"}, "/ssd/target", "/ssd/target"},
+		{[]string{"CARGO_BUILD_BUILD_DIR=/ssd/build"}, ownDir, "/ssd/build"},
+	} {
+		shared := slices.Clone(tc.env)
+		cfg := clawServerProcConfig(root, tc.env, proc.Ports{}, t.TempDir(), "sidecar.json", nil)
+		if got := envValue(cfg.Env, "CARGO_TARGET_DIR"); got != tc.wantTarget {
+			t.Errorf("env %v: expected CARGO_TARGET_DIR %q, got %q", tc.env, tc.wantTarget, got)
+		}
+		if got := envValue(cfg.Env, "CARGO_BUILD_BUILD_DIR"); got != tc.wantBuild {
+			t.Errorf("env %v: expected CARGO_BUILD_BUILD_DIR %q, got %q", tc.env, tc.wantBuild, got)
+		}
+		if !reflect.DeepEqual(tc.env, shared) {
+			t.Errorf("expected the env shared with the other watch processes to stay %v, got %v", shared, tc.env)
+		}
 	}
 }
 
 func TestRustClawWatchInputsUseSourceAndManifestInputs(t *testing.T) {
 	root := t.TempDir()
 	for _, dir := range []string{
-		"apps/claw-server-rust/tests/fixtures/legacy-drizzle",
-		"apps/claw-server-rust/src",
+		"apps/claw-server/tests/fixtures/legacy-drizzle",
+		"apps/claw-server/src",
 		"crates/browseros-core/src",
 		"crates/browseros-cdp/src",
 		"crates/browseros-cdp/protocol",
@@ -306,7 +340,7 @@ func TestRustClawWatchInputsUseSourceAndManifestInputs(t *testing.T) {
 		}
 	}
 	for _, file := range []string{
-		"apps/claw-server-rust/Cargo.toml",
+		"apps/claw-server/Cargo.toml",
 		"crates/browseros-core/Cargo.toml",
 		"crates/browseros-cdp/Cargo.toml",
 		"crates/browseros-cdp/build.rs",
@@ -318,9 +352,9 @@ func TestRustClawWatchInputsUseSourceAndManifestInputs(t *testing.T) {
 
 	inputs := rustClawWatchInputs(root)
 	for _, want := range []string{
-		filepath.Join(root, "apps/claw-server-rust/src"),
-		filepath.Join(root, "apps/claw-server-rust/Cargo.toml"),
-		filepath.Join(root, "apps/claw-server-rust/tests/fixtures/legacy-drizzle"),
+		filepath.Join(root, "apps/claw-server/src"),
+		filepath.Join(root, "apps/claw-server/Cargo.toml"),
+		filepath.Join(root, "apps/claw-server/tests/fixtures/legacy-drizzle"),
 		filepath.Join(root, "crates/browseros-cdp/src"),
 		filepath.Join(root, "crates/browseros-cdp/Cargo.toml"),
 		filepath.Join(root, "crates/browseros-cdp/build.rs"),
@@ -343,7 +377,7 @@ func TestRustClawWatchInputsUseSourceAndManifestInputs(t *testing.T) {
 
 func TestRustWatchSnapshotDetectsSourceChangesAndSkipsTargetDirs(t *testing.T) {
 	root := t.TempDir()
-	srcDir := filepath.Join(root, "apps/claw-server-rust/src")
+	srcDir := filepath.Join(root, "apps/claw-server/src")
 	targetDir := filepath.Join(srcDir, "target")
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -377,36 +411,6 @@ func TestRustWatchSnapshotDetectsSourceChangesAndSkipsTargetDirs(t *testing.T) {
 	}
 	if path != sourcePath {
 		t.Fatalf("expected changed path %q, got %q", sourcePath, path)
-	}
-}
-
-func TestEnsureLimactlPresentMissingMessage(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-
-	err := ensureLimactlPresent()
-	if err == nil {
-		t.Fatal("expected missing Lima error")
-	}
-
-	msg := err.Error()
-	if !strings.Contains(msg, "Lima is not installed.") {
-		t.Fatalf("expected missing Lima message, got %q", msg)
-	}
-	if !strings.Contains(msg, "brew install lima") {
-		t.Fatalf("expected brew install hint, got %q", msg)
-	}
-}
-
-func TestEnsureLimactlPresentFindsPathBinary(t *testing.T) {
-	binDir := t.TempDir()
-	limactlPath := filepath.Join(binDir, "limactl")
-	if err := os.WriteFile(limactlPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir)
-
-	if err := ensureLimactlPresent(); err != nil {
-		t.Fatalf("expected limactl to resolve, got %v", err)
 	}
 }
 

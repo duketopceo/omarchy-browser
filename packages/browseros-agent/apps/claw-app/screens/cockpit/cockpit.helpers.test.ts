@@ -3,8 +3,8 @@ import type { SessionBrowserTab, SessionSummary } from '@browseros/claw-api'
 import {
   colorForSlug,
   formatRelative,
-  formatToolTrail,
-  harnessForRow,
+  partOfDay,
+  roundTimeSaved,
   sessionsToLiveCards,
   siteOf,
 } from './cockpit.helpers'
@@ -67,29 +67,6 @@ describe('display fallbacks', () => {
   it('keeps slug colors deterministic', () => {
     expect(colorForSlug('finance')).toBe(colorForSlug('finance'))
     expect(colorForSlug('travel')).toMatch(/^#[0-9A-F]{6}$/i)
-  })
-
-  it('keeps known harnesses and uses the existing fallback', () => {
-    expect(harnessForRow('Cursor')).toBe('Cursor')
-    expect(harnessForRow('Codex')).toBe('Codex')
-    expect(harnessForRow(undefined)).toBe('Claude Code')
-    expect(harnessForRow('Atlas-9000')).toBe('Claude Code')
-  })
-})
-
-describe('formatToolTrail', () => {
-  it('joins tool names and caps the visible tail', () => {
-    const tools = ['navigate', 'snapshot', 'act', 'read', 'grep', 'screenshot']
-    expect(
-      formatToolTrail(
-        tools.map((name, index) => ({ name, at: index })),
-        4,
-      ),
-    ).toBe('act -> read -> grep -> screenshot')
-  })
-
-  it('returns an empty string for an empty trail', () => {
-    expect(formatToolTrail([])).toBe('')
   })
 })
 
@@ -258,7 +235,6 @@ describe('sessionsToLiveCards', () => {
     expect(card).toMatchObject({
       profileId: 'profile-parent',
       label: 'parent-slug',
-      harness: 'Claude Code',
       color: colorForSlug('parent-slug'),
     })
   })
@@ -275,5 +251,28 @@ describe('sessionsToLiveCards', () => {
       'session-b',
       'session-c',
     ])
+  })
+})
+
+describe('partOfDay', () => {
+  it('switches at 5:00, 12:00 and 17:00 local time', () => {
+    expect(partOfDay(4)).toBe('evening')
+    expect(partOfDay(5)).toBe('morning')
+    expect(partOfDay(11)).toBe('morning')
+    expect(partOfDay(12)).toBe('afternoon')
+    expect(partOfDay(16)).toBe('afternoon')
+    expect(partOfDay(17)).toBe('evening')
+  })
+})
+
+describe('roundTimeSaved', () => {
+  it('uses hours from one hour up, minutes below, and nothing under a minute', () => {
+    expect(roundTimeSaved(30.4 * 3_600_000)).toEqual({
+      amount: 30,
+      unit: 'hour',
+    })
+    expect(roundTimeSaved(3_600_000)).toEqual({ amount: 1, unit: 'hour' })
+    expect(roundTimeSaved(59 * 60_000)).toEqual({ amount: 59, unit: 'minute' })
+    expect(roundTimeSaved(20_000)).toBeNull()
   })
 })

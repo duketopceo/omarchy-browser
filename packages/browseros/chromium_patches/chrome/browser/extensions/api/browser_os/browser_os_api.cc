@@ -1,9 +1,9 @@
 diff --git a/chrome/browser/extensions/api/browser_os/browser_os_api.cc b/chrome/browser/extensions/api/browser_os/browser_os_api.cc
 new file mode 100644
-index 0000000000000000000000000000000000000000..99a8b9c8df1bdc73113bc78ecf559c454adfa267
+index 0000000000000000000000000000000000000000..3b0172e8340200d55781af150bf3f9fc93f21a17
 --- /dev/null
 +++ b/chrome/browser/extensions/api/browser_os/browser_os_api.cc
-@@ -0,0 +1,349 @@
+@@ -0,0 +1,391 @@
 +// Copyright 2024 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -22,12 +22,12 @@ index 0000000000000000000000000000000000000000..99a8b9c8df1bdc73113bc78ecf559c45
 +#include "base/time/time.h"
 +#include "base/values.h"
 +#include "base/version_info/version_info.h"
++#include "build/build_config.h"
 +#include "chrome/browser/browser_process.h"
 +#include "chrome/browser/browseros/metrics/browseros_metrics.h"
 +#include "chrome/browser/infobars/confirm_infobar_creator.h"
 +#include "chrome/browser/platform_util.h"
 +#include "chrome/browser/profiles/profile.h"
-+#include "chrome/browser/ui/browser_window/public/browser_window_features.h"
 +#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 +#include "chrome/browser/ui/browser_window/public/profile_browser_collection.h"
 +#include "chrome/browser/ui/select_file_policy/chrome_select_file_policy.h"
@@ -39,6 +39,10 @@ index 0000000000000000000000000000000000000000..99a8b9c8df1bdc73113bc78ecf559c45
 +#include "components/infobars/core/infobar.h"
 +#include "components/infobars/core/infobar_delegate.h"
 +#include "components/infobars/core/simple_alert_infobar_delegate.h"
++
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/extensions/api/browser_os/browser_os_attention_mac.h"
++#endif
 +#include "components/prefs/pref_service.h"
 +#include "content/public/browser/web_contents.h"
 +#include "ui/shell_dialogs/selected_file_info.h"
@@ -97,10 +101,9 @@ index 0000000000000000000000000000000000000000..99a8b9c8df1bdc73113bc78ecf559c45
 +  browser_os::PrefObject pref_obj;
 +  pref_obj.key = params->name;
 +
-+  const base::Value* value = prefs->GetUserPrefValue(params->name);
-+  if (!value) {
-+    value = prefs->GetDefaultPrefValue(params->name);
-+  }
++  // The effective value, so values forced by policy or the command line
++  // (e.g. --disable-browseros-features) show through.
++  const base::Value* value = prefs->FindPreference(params->name)->GetValue();
 +
 +  pref_obj.type = GetPrefTypeName(value);
 +  pref_obj.value = value->Clone();
@@ -286,7 +289,7 @@ index 0000000000000000000000000000000000000000..99a8b9c8df1bdc73113bc78ecf559c45
 +    return RespondNow(Error("No active browser window"));
 +  }
 +
-+  ToastController* toast_controller = browser->GetFeatures().toast_controller();
++  ToastController* toast_controller = ToastController::From(browser);
 +  if (!toast_controller) {
 +    return RespondNow(Error("Toast controller unavailable"));
 +  }
@@ -349,6 +352,45 @@ index 0000000000000000000000000000000000000000..99a8b9c8df1bdc73113bc78ecf559c45
 +
 +  return RespondNow(
 +      ArgumentList(browser_os::ShowInfoBar::Results::Create(shown)));
++}
++
++// Bridges chrome.browserOS.requestAttention to the macOS dock bounce. Other
++// platforms report false; extensions there can use chrome.windows.update's
++// drawAttention instead.
++ExtensionFunction::ResponseAction BrowserOSRequestAttentionFunction::Run() {
++  std::optional<browser_os::RequestAttention::Params> params =
++      browser_os::RequestAttention::Params::Create(args());
++  EXTENSION_FUNCTION_VALIDATE(params);
++
++  bool requested = false;
++#if BUILDFLAG(IS_MAC)
++  const bool critical = params->options && params->options->critical &&
++                        *params->options->critical;
++  requested = browser_os_attention::RequestAttention(critical);
++#endif
++  return RespondNow(ArgumentList(
++      browser_os::RequestAttention::Results::Create(requested)));
++}
++
++ExtensionFunction::ResponseAction BrowserOSCancelAttentionFunction::Run() {
++#if BUILDFLAG(IS_MAC)
++  browser_os_attention::CancelAttention();
++#endif
++  return RespondNow(NoArguments());
++}
++
++ExtensionFunction::ResponseAction BrowserOSSetDockBadgeFunction::Run() {
++  std::optional<browser_os::SetDockBadge::Params> params =
++      browser_os::SetDockBadge::Params::Create(args());
++  EXTENSION_FUNCTION_VALIDATE(params);
++
++  bool set = false;
++#if BUILDFLAG(IS_MAC)
++  browser_os_attention::SetDockBadge(params->text);
++  set = true;
++#endif
++  return RespondNow(
++      ArgumentList(browser_os::SetDockBadge::Results::Create(set)));
 +}
 +
 +}  // namespace api

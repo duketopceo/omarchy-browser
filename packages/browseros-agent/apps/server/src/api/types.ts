@@ -23,6 +23,10 @@ export type { BrowserContext }
 export const AgentLLMConfigSchema = LLMConfigSchema.extend({
   model: z.string().min(1, 'Model name is required'),
   upstreamProvider: z.string().optional(),
+  // Set when testing an existing provider. Its stored credentials are redacted
+  // from the client, so the test route fills blank credential fields from the
+  // saved row (matching type) rather than failing on an empty key.
+  providerId: z.string().optional(),
 })
 
 const PreviousConversationSchema = z
@@ -63,11 +67,17 @@ const ChatInputSchema = z.object({
     })
     .optional(),
   previousConversation: PreviousConversationSchema,
-  // 'local': the server owns history in SQLite (load + persist). 'cloud': the
-  // client owns history (logged-in cloud sync or incognito); the server stays
-  // stateless and persists nothing. Defaults to 'cloud' so existing clients are
-  // unchanged until they opt into server-owned history.
-  historyMode: z.enum(['local', 'cloud']).optional().default('cloud'),
+  // Whether this conversation is written to the local database. False for
+  // incognito and temporary chats, where the server stays stateless.
+  //
+  // Defaults to true. It replaces historyMode, whose values were 'local' and
+  // 'cloud' and whose default was 'cloud', so a caller that simply omitted it
+  // silently got no history at all. That default was safe only while the
+  // cloud still held the conversation; there is no cloud now, so the safe
+  // default is the one that keeps the data.
+  persist: z.boolean().optional(),
+  /** @deprecated Superseded by `persist`. Still accepted, since the extension updates independently of the browser binary. */
+  historyMode: z.enum(['local', 'cloud']).optional(),
   attachments: z
     .array(
       z.object({

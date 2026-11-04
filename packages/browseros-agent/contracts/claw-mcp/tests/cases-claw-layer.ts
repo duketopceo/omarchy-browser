@@ -1,8 +1,9 @@
 /**
  * name_session (3) + the claw-layer cross-cutting invariants: two-session
- * ownership isolation [1], browser-down guidance [2], trust-boundary
+ * ownership labeling [1], browser-down guidance [2], trust-boundary
  * nonce fencing [3], auto-context embedding [4], REST audit tie-in [5],
- * and cancellation [6]. ([7] transport lives in cases-transport.)
+ * cancellation [6], and card screenshots [8]. ([7] transport lives in
+ * cases-transport.)
  *
  * The browser-kill case POISONS the shared browser, so it is registered
  * LAST and the runner skips per-case page cleanup once the browser is
@@ -108,9 +109,9 @@ export const clawLayerCases: ContractCase[] = [
     },
   },
 
-  // [1] two-session ownership isolation ------------------------------------
+  // [1] two-session ownership labeling -------------------------------------
   {
-    name: 'ownership: a second session cannot act on the first session pages',
+    name: 'ownership: cross-session access preserves labels without blocking',
     smoke: true,
     async run(ctx) {
       const other = await ctx.openSession('agent-other')
@@ -134,24 +135,19 @@ export const clawLayerCases: ContractCase[] = [
           `foreign page not bucketed for the other session:\n${bucketed.slice(0, 300)}`,
         )
       }
-      // And is refused act + close, with an ownership-guard error.
+      // Ownership identifies whose work this is, rather than granting access.
+      // A foreign read must succeed, name the owner, and leave the claim intact.
       const foreignSnapshot = await other.callTool('snapshot', {
         page: ownPage,
       })
-      const foreignClose = await other.callTool('tabs', {
-        action: 'close',
-        page: ownPage,
-      })
-      for (const [operation, result] of [
-        ['snapshot', foreignSnapshot],
-        ['close', foreignClose],
-      ] as const) {
-        const text = textOf(result)
-        if (!result.isError || errorClass(text) !== 'not-owned') {
-          throw new Error(`foreign ${operation} was not refused: ${text}`)
-        }
+      expectOk(foreignSnapshot, 'foreign snapshot')
+      const notice = textOf(foreignSnapshot)
+      if (
+        !notice.includes(`page ${ownPage} belongs to another agent`) ||
+        !notice.includes('You are allowed to use it')
+      ) {
+        throw new Error(`foreign snapshot lost its ownership notice: ${notice}`)
       }
-      // The owner is unaffected: the page still lists and snapshots.
       const stillOwned = textOf(
         await ctx.mcp.callTool('tabs', { action: 'list' }),
       )
@@ -162,6 +158,17 @@ export const clawLayerCases: ContractCase[] = [
         await ctx.mcp.callTool('snapshot', { page: ownPage }),
         'owner snapshot after foreign attempt',
       )
+
+      // Explicit cross-session mutations are allowed too. Closing must remove
+      // the page from the owner's list, rather than retain a stale owned tab.
+      expectOk(
+        await other.callTool('tabs', { action: 'close', page: ownPage }),
+        'foreign close',
+      )
+      await waitUntil(async () => {
+        const pages = textOf(await ctx.mcp.callTool('tabs', { action: 'list' }))
+        return !pages.includes(`[${ownPage}]`)
+      }, 'the owner list to remove the closed page')
     },
   },
 
@@ -275,7 +282,7 @@ export const clawLayerCases: ContractCase[] = [
       })
       const page = Number(textOf(opened).match(/opened page (\d+)/)?.[1])
       // A deliberately over-length argument to exercise the 4096 clamp.
-      await session.callTool('evaluate', {
+      await session.callTool('evaluate_in_page', {
         page,
         code: `return "${'q'.repeat(6000)}"`,
       })
@@ -283,14 +290,14 @@ export const clawLayerCases: ContractCase[] = [
       let audit = await auditSession(ctx, sessionId)
       await waitUntil(async () => {
         audit = await auditSession(ctx, sessionId)
-        return audit.dispatches.some((d) => d.toolName === 'evaluate')
+        return audit.dispatches.some((d) => d.toolName === 'evaluate_in_page')
       }, 'the audit log to record the dispatches')
       const tools = audit.dispatches.map((d) => d.toolName)
-      if (!tools.includes('tabs') || !tools.includes('evaluate')) {
+      if (!tools.includes('tabs') || !tools.includes('evaluate_in_page')) {
         throw new Error(`audit missing expected tool names: ${tools.join(',')}`)
       }
       const evalDispatch = audit.dispatches.find(
-        (d) => d.toolName === 'evaluate',
+        (d) => d.toolName === 'evaluate_in_page',
       )
       const argsJson = evalDispatch?.argsJson as string | undefined
       if (argsJson?.length !== 4096 || !argsJson.endsWith('~')) {
@@ -372,7 +379,7 @@ export const clawLayerCases: ContractCase[] = [
       } catch (error) {
         rejection = error
       }
-      if (!String(rejection).includes('no longer live')) {
+      if (!String(rejection).includes('was stopped and will not resume')) {
         throw new Error(
           `post-cancel browser call was not rejected: ${rejection}`,
         )
@@ -388,6 +395,79 @@ export const clawLayerCases: ContractCase[] = [
       const tools = await session.listTools()
       if (tools.length === 0) {
         throw new Error('cancel closed the underlying MCP transport')
+      }
+    },
+  },
+
+  // [8] card screenshots ---------------------------------------------------
+  {
+    name: 'audit: a card fill keeps its page out of screenshots until the page reloads',
+    async run(ctx) {
+      const session = await ctx.openSession('card-audit-client')
+      await waitUntil(
+        async () =>
+          !(await session.callTool('tabs', { action: 'list' })).isError,
+        'the card audit session to attach',
+        { timeoutMs: 30_000 },
+      )
+      // Natives without the Payments domain hide the tool.
+      const tools = await session.listTools()
+      if (!tools.some((tool) => tool.name === 'payment_cards')) return
+      const sessionId = session.sessionId
+      if (!sessionId) throw new Error('card audit session has no id')
+      const opened = await session.callTool('tabs', {
+        action: 'new',
+        url: ctx.fixture('/checkout.html'),
+      })
+      const page = Number(textOf(opened).match(/opened page (\d+)/)?.[1])
+      // Snapshots the page and reports whether its audit row got a screenshot
+      // within the window; rows appear first, screenshots attach after.
+      const snapshotScreenshotted = async (windowMs: number) => {
+        const count = async () =>
+          (await auditSession(ctx, sessionId)).dispatches.filter(
+            (d) => d.toolName === 'snapshot',
+          )
+        const before = (await count()).length
+        expectOk(await session.callTool('snapshot', { page }), 'snapshot')
+        const deadline = Date.now() + windowMs
+        for (;;) {
+          const rows = await count()
+          if (rows.length > before && rows.at(-1)?.screenshotId !== undefined) {
+            return true
+          }
+          if (Date.now() > deadline) return false
+          await new Promise((resolve) => setTimeout(resolve, 250))
+        }
+      }
+      if (!(await snapshotScreenshotted(15_000))) {
+        throw new Error(
+          'the checkout page was never screenshotted before the fill',
+        )
+      }
+      expectOk(
+        await session.callTool('payment_cards', {
+          action: 'fill',
+          page,
+          card: {
+            number: '4111 1111 1111 1111',
+            expiryMonth: 12,
+            expiryYear: 2030,
+          },
+        }),
+        'payment card fill',
+      )
+      // As long as the positive checks wait, so a slow capture can't pass vacuously.
+      if (await snapshotScreenshotted(15_000)) {
+        throw new Error(
+          'a screenshot was stored while the page showed a filled card',
+        )
+      }
+      expectOk(
+        await session.callTool('navigate', { page, action: 'reload' }),
+        'reload',
+      )
+      if (!(await snapshotScreenshotted(15_000))) {
+        throw new Error('screenshots stayed off after the page reloaded')
       }
     },
   },

@@ -1,4 +1,4 @@
-use crate::{CoreError, ProtocolSession, input::Point};
+use crate::{CoreError, PageJs, ProtocolSession, input::Point};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -75,23 +75,6 @@ struct BoxModel {
 }
 
 #[derive(Debug, Deserialize)]
-struct ResolveNodeResult {
-    object: Option<RemoteObject>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RemoteObject {
-    object_id: Option<String>,
-    value: Option<Value>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CallFunctionResult {
-    result: RemoteObject,
-}
-
-#[derive(Debug, Deserialize)]
 struct PushNodesResult {
     #[serde(rename = "nodeIds")]
     node_ids: Vec<i64>,
@@ -103,6 +86,67 @@ struct Bounds {
     y: f64,
     w: f64,
     h: f64,
+}
+
+/// Native content quads retain transformed and multi-line geometry. A missing
+/// rectangle is a typed preparation failure; the click transaction owns recovery.
+pub(super) async fn get_element_quads(
+    session: &ProtocolSession,
+    backend_node_id: i64,
+) -> Result<Vec<Vec<Point>>, CoreError> {
+    let result = session
+        .send::<_, QuadsResult>(
+            "DOM.getContentQuads",
+            json!({ "backendNodeId": backend_node_id }),
+        )
+        .await;
+    if let Ok(result) = result {
+        let quads: Vec<_> = result
+            .quads
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|quad| quad.len() == 8 && quad.iter().all(|n| n.is_finite()))
+            .map(|quad| {
+                quad.as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&[x, y]| Point { x, y })
+                    .collect()
+            })
+            .collect();
+        if !quads.is_empty() {
+            return Ok(quads);
+        }
+    }
+    let rect: Option<Bounds> = PageJs::isolated(session)
+        .call(backend_node_id, BOUNDS_JS, &[])
+        .await?;
+    let rect = rect
+        .filter(|rect| rect.w > 0.0 && rect.h > 0.0)
+        .ok_or_else(|| {
+            CoreError::ClickPointUnavailable(
+                "Element has no visible click area; take a new snapshot. No click was sent."
+                    .to_string(),
+            )
+        })?;
+    Ok(vec![vec![
+        Point {
+            x: rect.x,
+            y: rect.y,
+        },
+        Point {
+            x: rect.x + rect.w,
+            y: rect.y,
+        },
+        Point {
+            x: rect.x + rect.w,
+            y: rect.y + rect.h,
+        },
+        Point {
+            x: rect.x,
+            y: rect.y + rect.h,
+        },
+    ]])
 }
 
 /// The point is in `session`'s coordinate basis. Dispatch input through the same
@@ -137,23 +181,10 @@ pub async fn get_element_center(
         return Ok(quad_center(&model.content));
     }
 
-    let object_id = resolve_object_id(session, backend_node_id, None).await?;
-    let bounds: CallFunctionResult = session
-        .send(
-            "Runtime.callFunctionOn",
-            json!({
-                "functionDeclaration": BOUNDS_JS,
-                "objectId": object_id,
-                "returnByValue": true
-            }),
-        )
-        .await?;
-    let value = bounds
-        .result
-        .value
+    let rect: Bounds = PageJs::isolated(session)
+        .call::<Option<Bounds>>(backend_node_id, BOUNDS_JS, &[])
+        .await?
         .ok_or_else(|| CoreError::Message("Could not get element bounds.".to_string()))?;
-    let rect: Bounds =
-        serde_json::from_value(value).map_err(|err| CoreError::Message(err.to_string()))?;
     Ok(Point {
         x: rect.x + rect.w / 2.0,
         y: rect.y + rect.h / 2.0,
@@ -174,25 +205,13 @@ pub async fn click_blocker_at_point(
     backend_node_id: i64,
     point: Point,
 ) -> Result<Option<String>, CoreError> {
-    let object_id = resolve_object_id(session, backend_node_id, None).await?;
-    let result: CallFunctionResult = session
-        .send(
-            "Runtime.callFunctionOn",
-            json!({
-                "functionDeclaration": HIT_TEST_BLOCKER_JS,
-                "objectId": object_id,
-                "returnByValue": true,
-                "arguments": [
-                    { "value": point.x },
-                    { "value": point.y }
-                ]
-            }),
+    PageJs::isolated(session)
+        .call(
+            backend_node_id,
+            HIT_TEST_BLOCKER_JS,
+            &[json!(point.x), json!(point.y)],
         )
-        .await?;
-    Ok(result
-        .result
-        .value
-        .and_then(|value| value.as_str().map(ToString::to_string)))
+        .await
 }
 
 pub async fn focus_element(
@@ -216,94 +235,62 @@ pub async fn focus_element(
     Ok(())
 }
 
-pub async fn js_click(session: &ProtocolSession, backend_node_id: i64) -> Result<(), CoreError> {
-    let object_id = resolve_object_id(session, backend_node_id, None).await?;
-    let _: Value = session
-        .send(
-            "Runtime.callFunctionOn",
-            json!({ "functionDeclaration": "function(){this.click()}", "objectId": object_id }),
-        )
-        .await?;
-    Ok(())
-}
-
-pub async fn get_input_value(session: &ProtocolSession, backend_node_id: i64) -> String {
-    call_on_element(
-        session,
-        backend_node_id,
-        "function(){return this.value??this.textContent??\"\"}",
-        None,
-    )
-    .await
-    .ok()
-    .and_then(|value| value.as_str().map(ToString::to_string))
-    .unwrap_or_default()
-}
-
-pub async fn call_on_element(
+// `DOM.focus` needs `DOM.getDocument` to have run for the session first, which
+// fresh MCP sessions have not done, so it fails with "Document needs to be
+// requested first" (#2640). `HTMLElement.focus()` over `Runtime.callFunctionOn`
+// has no such dependency and uses the shared PageJs runtime path.
+//
+// Success is confirmed against the resulting active element, not merely that a
+// `focus` method exists: every HTMLElement exposes `focus()`, but disabled or
+// otherwise unfocusable targets stay unfocused, and reporting those as success
+// would let `act focus` claim it moved focus when it did not. `getRootNode()`
+// resolves the active element inside the element's own root so shadow-DOM
+// targets are not mistaken for failures.
+pub async fn focus_element_js(
     session: &ProtocolSession,
     backend_node_id: i64,
-    function_declaration: &str,
-    args: Option<Vec<Value>>,
-) -> Result<Value, CoreError> {
-    let object_id = resolve_object_id(session, backend_node_id, None).await?;
-    let result: CallFunctionResult = session
-        .send(
-            "Runtime.callFunctionOn",
-            call_function_params(function_declaration, object_id, args),
+) -> Result<(), CoreError> {
+    let focused: Option<bool> = PageJs::isolated(session)
+        .call(
+            backend_node_id,
+            "function(){if(typeof this.focus!=='function'){return false}this.focus();return this.getRootNode().activeElement===this}",
+            &[],
         )
         .await?;
-    Ok(result.result.value.unwrap_or(Value::Null))
-}
-
-fn call_function_params(
-    function_declaration: &str,
-    object_id: String,
-    args: Option<Vec<Value>>,
-) -> Value {
-    let mut params = serde_json::Map::new();
-    params.insert(
-        "functionDeclaration".to_string(),
-        Value::String(function_declaration.to_string()),
-    );
-    params.insert("objectId".to_string(), Value::String(object_id));
-    params.insert("returnByValue".to_string(), Value::Bool(true));
-    if let Some(args) = args {
-        params.insert(
-            "arguments".to_string(),
-            Value::Array(
-                args.into_iter()
-                    .map(|value| json!({ "value": value }))
-                    .collect(),
-            ),
-        );
+    if focused.unwrap_or(false) {
+        Ok(())
+    } else {
+        Err(CoreError::Message(
+            "Element cannot receive focus.".to_string(),
+        ))
     }
-    Value::Object(params)
 }
 
-pub async fn resolve_object_id(
+/// Read the connected field, preserving the distinction between empty and unreadable.
+pub async fn get_input_value(
     session: &ProtocolSession,
     backend_node_id: i64,
-    object_group: Option<&str>,
 ) -> Result<String, CoreError> {
-    let mut params = serde_json::Map::new();
-    params.insert("backendNodeId".to_string(), Value::from(backend_node_id));
-    if let Some(object_group) = object_group {
-        params.insert(
-            "objectGroup".to_string(),
-            Value::String(object_group.to_string()),
-        );
-    }
-    let resolved: ResolveNodeResult = session
-        .send("DOM.resolveNode", Value::Object(params))
+    let value: Option<String> = PageJs::isolated(session)
+        .call(backend_node_id, READ_INPUT_VALUE_JS, &[])
         .await?;
-    resolved
-        .object
-        .and_then(|object| object.object_id)
-        .ok_or_else(|| {
-            CoreError::Message("Element not found in DOM. Take a new snapshot.".to_string())
-        })
+    value.ok_or_else(|| {
+        CoreError::Message("Could not read the field value. Take a new snapshot.".to_string())
+    })
 }
+
+// Blink keeps a lone <br> as the caret placeholder in an emptied editing host.
+// Its innerText is a newline, but it represents no user text. Do not trim actual
+// whitespace or multiple line breaks from a nonempty editor.
+const READ_INPUT_VALUE_JS: &str = r#"
+function() {
+    if (!this.isConnected) return null;
+    if (typeof this.value === 'string') return this.value;
+    if (!this.isContentEditable) return null;
+    if (this.childNodes.length === 1 && this.firstChild.nodeName === 'BR') return '';
+    return this.innerText;
+}
+"#;
 
 fn quad_center(quad: &[f64]) -> Point {
     Point {
@@ -314,7 +301,7 @@ fn quad_center(quad: &[f64]) -> Point {
 
 #[cfg(test)]
 mod tests {
-    use super::{call_function_params, click_blocker_at_point};
+    use super::{click_blocker_at_point, focus_element_js};
     use crate::{CoreError, ProtocolSession, connection::CdpConnection, input::Point};
     use browseros_cdp::{CdpError, CdpEvent};
     use futures_util::future::BoxFuture;
@@ -327,6 +314,7 @@ mod tests {
         Blocked(&'static str),
         Clear,
         Error,
+        Bool(bool),
     }
 
     struct MockConnection {
@@ -357,6 +345,9 @@ mod tests {
                                 code: -32000,
                                 message: "execution context unavailable".to_string(),
                             }),
+                            HitTestResponse::Bool(value) => {
+                                Ok(json!({ "result": { "value": value } }))
+                            }
                         }
                     }
                     _ => Ok(json!({})),
@@ -393,13 +384,6 @@ mod tests {
             calls: Mutex::new(Vec::new()),
         });
         (connection.clone(), ProtocolSession::root(connection))
-    }
-
-    #[test]
-    fn call_function_omits_absent_arguments() {
-        let params = call_function_params("function(){return this.checked}", "node-1".into(), None);
-
-        assert_eq!(params.get("arguments"), None);
     }
 
     #[tokio::test]
@@ -461,6 +445,40 @@ mod tests {
         let (_connection, session) = session_with(HitTestResponse::Error);
 
         let result = click_blocker_at_point(&session, 10, Point { x: 50.0, y: 25.0 }).await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn focus_element_js_focuses_through_runtime() -> Result<(), CoreError> {
+        let (connection, session) = session_with(HitTestResponse::Bool(true));
+
+        focus_element_js(&session, 10).await?;
+
+        let calls = match connection.calls.lock() {
+            Ok(calls) => calls.clone(),
+            Err(_err) => Vec::new(),
+        };
+        // Focus must go through Runtime.callFunctionOn (this.focus()), never the
+        // DOM domain that needs a prior DOM.getDocument (#2640), and it must
+        // confirm the element actually became active rather than trusting that a
+        // focus method exists.
+        assert_eq!(calls.len(), 1);
+        let function = calls
+            .first()
+            .and_then(|call| call.get("functionDeclaration"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert!(function.contains("this.focus()"));
+        assert!(function.contains("activeElement===this"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn focus_element_js_reports_unfocusable_element() {
+        let (_connection, session) = session_with(HitTestResponse::Bool(false));
+
+        let result = focus_element_js(&session, 10).await;
 
         assert!(result.is_err());
     }

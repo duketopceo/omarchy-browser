@@ -8,7 +8,7 @@ use crate::{
     trust_boundary::wrap_untrusted,
 };
 use browseros_core::{
-    PageId,
+    CoreError, PageId, PageJs,
     content_markdown::{ContentMarkdownOptions, build_content_markdown_expression},
 };
 use futures_util::future::BoxFuture;
@@ -49,25 +49,6 @@ struct ReadArgs {
     include_images: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct EvaluateResult {
-    result: RemoteObject,
-    exception_details: Option<ExceptionDetails>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RemoteObject {
-    value: Option<Value>,
-    description: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ExceptionDetails {
-    text: String,
-    exception: Option<RemoteObject>,
-}
-
 pub fn definition() -> crate::framework::ToolDef {
     super::def::<ReadArgs>(
         "read",
@@ -85,14 +66,13 @@ fn handler<'a>(
     Box::pin(async move {
         let args: ReadArgs = parse_args(raw)?;
         let origin = ctx
-            .session
-            .pages
-            .get_info(PageId(args.page))
-            .await
+            .browser
+            .refresh_page(PageId(args.page))
+            .await?
             .map(|info| info.url)
             .unwrap_or_else(|| "unknown".to_string());
         if matches!(args.format, ReadFormat::Console) {
-            let entries = ctx.session.page_signals.console_entries(&PageId(args.page));
+            let entries = ctx.browser.signals().console_entries(&PageId(args.page));
             let text = if entries.is_empty() {
                 "(no console errors or warnings)".to_string()
             } else {
@@ -114,28 +94,24 @@ fn handler<'a>(
         if let Some(result) = pending_dialog_result(ctx, PageId(args.page)) {
             return Ok(Some(result));
         }
-        let page = ctx.session.pages.get_session(PageId(args.page)).await?;
+        let page = ctx.browser.page_session(PageId(args.page)).await?;
         let expression = expression_for(&args)?;
-        let result: EvaluateResult = page
-            .session
-            .send(
-                "Runtime.evaluate",
-                json!({ "expression": expression, "returnByValue": true }),
-            )
-            .await?;
-        if let Some(exception) = result.exception_details {
-            return Ok(Some(error_result(format!(
-                "read: {}",
-                exception_message(exception)
-            ))));
-        }
+        let result = match PageJs::isolated(&page.session)
+            .eval_value(&expression)
+            .await
+        {
+            Ok(result) => result,
+            Err(CoreError::PageScript(message)) => {
+                return Ok(Some(error_result(format!("read: {message}"))));
+            }
+            Err(error) => return Err(error.into()),
+        };
         let text = result
-            .result
             .value
             .and_then(|value| value.as_str().map(ToString::to_string))
-            .or(result.result.description)
+            .or(result.description)
             .unwrap_or_default();
-        if text.len() <= INLINE_PAGE_CONTENT_MAX_CHARS {
+        if ctx.within_script || text.len() <= INLINE_PAGE_CONTENT_MAX_CHARS {
             return Ok(Some(text_result(
                 wrap_untrusted(if text.is_empty() { "(empty)" } else { &text }, &origin),
                 Some(json!({
@@ -209,13 +185,6 @@ fn root_expression(selector: Option<&str>) -> ToolExecResult<String> {
         ),
         None => "document.body".to_string(),
     })
-}
-
-fn exception_message(exception: ExceptionDetails) -> String {
-    exception
-        .exception
-        .and_then(|exception| exception.description)
-        .unwrap_or(exception.text)
 }
 
 fn format_name(format: &ReadFormat) -> &'static str {

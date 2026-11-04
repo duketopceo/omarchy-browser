@@ -7,18 +7,18 @@
     <language>en</language>
 
     <item>
-      <title>BrowserOS - 0.47.18</title>
+      <title>BrowserOS - 0.51.0</title>
       <description sparkle:format="plain-text">
       </description>
-      <sparkle:version>10000.0.47.18.0</sparkle:version>
-      <sparkle:shortVersionString>0.47.18</sparkle:shortVersionString>
-      <pubDate>Sat, 18 Jul 2026 02:44:03 +0000</pubDate>
+      <sparkle:version>10000.0.51.0.0</sparkle:version>
+      <sparkle:shortVersionString>0.51.0</sparkle:shortVersionString>
+      <pubDate>Mon, 05 Oct 2026 21:18:03 +0000</pubDate>
       <link>https://www.browseros.com/</link>
       <enclosure
-        url="http://cdn.browseros.com/releases/browseros/0.47.18/win/BrowserOS_v0.47.18_x64_installer.exe"
+        url="http://cdn.browseros.com/releases/browseros/0.51.0/win/BrowserOS_v0.51.0_x64_installer.exe"
         sparkle:os="windows"
-        sparkle:edSignature="QOqAIHdrdORvZzuox6lz6c635Da8mTOWPENkvdJGS/E2fYCKi938dPdn9B6+T3Gnp9V4GoIwvsbdatc7ThaTBw=="
-        length="159671864"
+        sparkle:edSignature="QV84GNg6puOafZBLS04yX812JYaBkgz0tbza+JxpcTesTQqQFRJQkzNI9UVJdmBbkvrCj/EYdH9Y2HPsrW0eBQ=="
+        length="160618552"
         type="application/octet-stream" />
     </item>
 

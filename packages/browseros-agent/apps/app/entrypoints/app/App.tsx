@@ -1,12 +1,10 @@
+import { DiagnosticsPage } from '@browseros/diagnostics/view'
 import type { FC } from 'react'
 import { HashRouter, Navigate, Route, Routes, useParams } from 'react-router'
-import { AuthLayout } from '@/components/layout/AuthLayout'
 import { SettingsSidebarLayout } from '@/components/layout/SettingsSidebarLayout'
 import { SidebarLayout } from '@/components/layout/SidebarLayout'
 import { AgentCommandHome } from '@/screens/agent-command/AgentCommandHome'
 import { AISettingsPage } from '@/screens/ai-settings/AISettingsPage'
-import { LoginPage } from '@/screens/auth/LoginPage'
-import { LogoutPage } from '@/screens/auth/LogoutPage'
 import { ConnectMCP } from '@/screens/connect-mcp/ConnectMCP'
 import { CustomizationPage } from '@/screens/customization/CustomizationPage'
 import { FeaturesPage } from '@/screens/features/Features'
@@ -18,9 +16,7 @@ import { NewTabLayout } from '@/screens/newtab/layout/NewTabLayout'
 import { Personalize } from '@/screens/newtab/personalize/Personalize'
 import { OmarchySettingsPage } from '@/screens/omarchy/OmarchySettingsPage'
 import { OnboardingAiPage } from '@/screens/onboarding-ai/OnboardingAiPage'
-import { ProfilePage } from '@/screens/profile/ProfilePage'
 import { ScheduledTasksPage } from '@/screens/scheduled-tasks/ScheduledTasksPage'
-import { UsagePage } from '@/screens/usage/UsagePage'
 
 function getSurveyParams(): { maxTurns?: number; experimentId?: string } {
   const params = new URLSearchParams(window.location.search)
@@ -55,12 +51,6 @@ export const App: FC = () => {
   return (
     <HashRouter>
       <Routes>
-        <Route element={<AuthLayout />}>
-          <Route path="login" element={<LoginPage />} />
-          <Route path="logout" element={<LogoutPage />} />
-          <Route path="profile" element={<ProfilePage />} />
-        </Route>
-
         <Route element={<SidebarLayout />}>
           <Route path="home" element={<NewTabLayout />}>
             <Route index element={<AgentCommandHome />} />
@@ -80,12 +70,12 @@ export const App: FC = () => {
             <Route path="mcp" element={<MCPSettingsPage />} />
             <Route path="omarchy" element={<OmarchySettingsPage />} />
             <Route path="customization" element={<CustomizationPage />} />
+            <Route path="diagnostics" element={<DiagnosticsPage />} />
             <Route
               path="search"
               element={<Navigate to="/settings/ai" replace />}
             />
             <Route path="survey" element={<SurveyPage {...surveyParams} />} />
-            <Route path="usage" element={<UsagePage />} />
             <Route path="*" element={<Navigate to="/settings/ai" replace />} />
           </Route>
         </Route>

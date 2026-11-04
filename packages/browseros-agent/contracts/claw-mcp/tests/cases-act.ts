@@ -1,7 +1,7 @@
 /**
  * act (20) — every kind and every failure path. Snapshots are taken
  * before each action to mint fresh refs; DOM state is verified through
- * evaluate (`return …`, since evaluate runs the code as a function body).
+ * evaluate_in_page (`return …`, since it runs the code as a function body).
  */
 
 import type { CaseContext, ContractCase } from './cases'
@@ -14,7 +14,7 @@ async function snapshot(ctx: CaseContext, page: number): Promise<string> {
 
 function refFor(snapshot: string, needle: string): string {
   for (const line of snapshot.split('\n')) {
-    if (line.includes(needle)) {
+    if (line.replace(/\s+"/g, '"').includes(needle)) {
       const match = line.match(/\[ref=(e\d+)\]/)
       if (match) return match[1]
     }
@@ -28,8 +28,8 @@ async function evalIn(
   code: string,
 ): Promise<string> {
   return expectOk(
-    await ctx.mcp.callTool('evaluate', { page, code }),
-    'evaluate',
+    await ctx.mcp.callTool('evaluate_in_page', { page, code }),
+    'evaluate_in_page',
   )
 }
 
@@ -62,7 +62,7 @@ export const actCases: ContractCase[] = [
     },
   },
   {
-    name: 'act: click on a covered element names the blocker',
+    name: 'act: covered double click names the blocker without changing the gesture',
     async run(ctx) {
       const page = await ctx.openPage(ctx.fixture('/overlay.html'))
       const snap = await snapshot(ctx, page)
@@ -70,8 +70,9 @@ export const actCases: ContractCase[] = [
         page,
         kind: 'click',
         ref: refFor(snap, 'Covered button'),
+        clickCount: 2,
       })
-      // The click must be refused with enough context to identify the blocker.
+      // DOM fallback cannot reproduce a double click; retain actionable coverage context.
       const text = textOf(result)
       const namesBlocker = /overlay|cover|intercept|obscur/i.test(text)
       const stillUntouched = (
@@ -122,7 +123,7 @@ export const actCases: ContractCase[] = [
     async run(ctx) {
       const page = await ctx.openPage(ctx.fixture('/form.html'))
       const snap = await snapshot(ctx, page)
-      const nameRef = refFor(snap, '"Name ')
+      const nameRef = refFor(snap, '"Name"')
       // type sends key events to the focused element; a real click is the
       // reliable focus primitive (act kind=focus is broken on both
       // servers — see the focus case). Click, then type.
@@ -179,7 +180,7 @@ export const actCases: ContractCase[] = [
     },
   },
   {
-    name: 'act: fill sets a single field',
+    name: 'act: fill replaces a prefilled single field',
     async run(ctx) {
       const page = await ctx.openPage(ctx.fixture('/form.html'))
       const snap = await snapshot(ctx, page)
@@ -187,7 +188,7 @@ export const actCases: ContractCase[] = [
         await ctx.mcp.callTool('act', {
           page,
           kind: 'fill',
-          ref: refFor(snap, '"Name '),
+          ref: refFor(snap, '"Nickname"'),
           value: 'Grace Hopper',
         }),
         'act fill',
@@ -195,25 +196,30 @@ export const actCases: ContractCase[] = [
       const value = await evalIn(
         ctx,
         page,
-        'return document.getElementById("name").value',
+        'return document.getElementById("nickname").value === "Grace Hopper"',
       )
-      if (!value.includes('Grace Hopper')) {
+      if (!value.includes('true')) {
         throw new Error(`fill did not set the field: ${value}`)
       }
     },
   },
   {
-    name: 'act: fill sets a whole form via fields[] in one call',
+    name: 'act: fill replaces a whole form via fields[] in one call',
     async run(ctx) {
       const page = await ctx.openPage(ctx.fixture('/form.html'))
+      await evalIn(
+        ctx,
+        page,
+        'document.getElementById("name").value="old name"; document.getElementById("bio").value="old bio"',
+      )
       const snap = await snapshot(ctx, page)
       expectOk(
         await ctx.mcp.callTool('act', {
           page,
           kind: 'fill',
           fields: [
-            { ref: refFor(snap, '"Name '), value: 'Katherine Johnson' },
-            { ref: refFor(snap, '"Bio '), value: 'orbital mechanics' },
+            { ref: refFor(snap, '"Name"'), value: 'Katherine Johnson' },
+            { ref: refFor(snap, '"Bio"'), value: 'orbital mechanics' },
           ],
         }),
         'act fill fields[]',
@@ -221,17 +227,14 @@ export const actCases: ContractCase[] = [
       const name = await evalIn(
         ctx,
         page,
-        'return document.getElementById("name").value',
+        'return document.getElementById("name").value === "Katherine Johnson"',
       )
       const bio = await evalIn(
         ctx,
         page,
-        'return document.getElementById("bio").value',
+        'return document.getElementById("bio").value === "orbital mechanics"',
       )
-      if (
-        !name.includes('Katherine Johnson') ||
-        !bio.includes('orbital mechanics')
-      ) {
+      if (!name.includes('true') || !bio.includes('true')) {
         throw new Error(`batch fill missed a field: name=${name} bio=${bio}`)
       }
     },
@@ -241,7 +244,7 @@ export const actCases: ContractCase[] = [
     async run(ctx) {
       const page = await ctx.openPage(ctx.fixture('/form.html'))
       const snap = await snapshot(ctx, page)
-      const nameRef = refFor(snap, '"Name ')
+      const nameRef = refFor(snap, '"Name"')
       expectOk(
         await ctx.mcp.callTool('act', { page, kind: 'click', ref: nameRef }),
       )
@@ -280,7 +283,7 @@ export const actCases: ContractCase[] = [
     async run(ctx) {
       const page = await ctx.openPage(ctx.fixture('/form.html'))
       const snap = await snapshot(ctx, page)
-      const nameRef = refFor(snap, '"Name ')
+      const nameRef = refFor(snap, '"Name"')
       expectOk(
         await ctx.mcp.callTool('act', { page, kind: 'click', ref: nameRef }),
       )
@@ -322,7 +325,7 @@ export const actCases: ContractCase[] = [
       const result = await ctx.mcp.callTool('act', {
         page,
         kind: 'press',
-        ref: refFor(snap, '"Name '),
+        ref: refFor(snap, '"Name"'),
         key: 'Cmd+c',
       })
       if (result.isError) {
@@ -339,7 +342,7 @@ export const actCases: ContractCase[] = [
         await ctx.mcp.callTool('act', {
           page,
           kind: 'press',
-          ref: refFor(snap, '"Name '),
+          ref: refFor(snap, '"Name"'),
           key: 'NotARealKey',
         }),
         'act press invalid key',
@@ -368,15 +371,15 @@ export const actCases: ContractCase[] = [
     },
   },
   {
-    name: 'act: focus by ref reports the current DOM-domain limitation',
+    name: 'act: focus by ref focuses the referenced element',
     async run(ctx) {
       const page = await ctx.openPage(ctx.fixture('/form.html'))
       const snap = await snapshot(ctx, page)
-      expectError(
+      expectOk(
         await ctx.mcp.callTool('act', {
           page,
           kind: 'focus',
-          ref: refFor(snap, '"Bio '),
+          ref: refFor(snap, '"Bio"'),
         }),
         'act focus by ref',
       )
@@ -385,9 +388,28 @@ export const actCases: ContractCase[] = [
         page,
         'return document.activeElement && document.activeElement.id',
       )
-      if (active.includes('bio')) {
-        throw new Error('failed focus action unexpectedly moved focus')
+      if (!active.includes('bio')) {
+        throw new Error(
+          `focus by ref did not move focus to the bio field (active: ${active})`,
+        )
       }
+    },
+  },
+  {
+    name: 'act: focus by ref rejects an element that cannot receive focus',
+    async run(ctx) {
+      const page = await ctx.openPage(ctx.fixture('/form.html'))
+      const snap = await snapshot(ctx, page)
+      // A disabled control still exposes HTMLElement.focus(); focus must report
+      // an error rather than a false success when focus does not actually move.
+      expectError(
+        await ctx.mcp.callTool('act', {
+          page,
+          kind: 'focus',
+          ref: refFor(snap, 'Disabled action'),
+        }),
+        'act focus by ref on a disabled control',
+      )
     },
   },
   {
@@ -462,7 +484,7 @@ export const actCases: ContractCase[] = [
     async run(ctx) {
       const page = await ctx.openPage(ctx.fixture('/form.html'))
       const snap = await snapshot(ctx, page)
-      const ref = refFor(snap, 'Color ')
+      const ref = refFor(snap, '"Color"')
       expectOk(
         await ctx.mcp.callTool('act', {
           page,
@@ -570,7 +592,7 @@ export const actCases: ContractCase[] = [
       // click off-stack so the dialog opens between CDP calls, then let
       // the dialog kinds resolve it.
       const openConfirm = () =>
-        ctx.mcp.callTool('evaluate', {
+        ctx.mcp.callTool('evaluate_in_page', {
           page,
           code: 'setTimeout(() => document.getElementById("trigger-confirm").click(), 0); return "scheduled"',
         })

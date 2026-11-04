@@ -8,14 +8,13 @@ import { EXTERNAL_URLS } from '@browseros/shared/constants/urls'
 import { LLM_PROVIDERS } from '@browseros/shared/schemas/llm'
 import { createOpenRouter } from '@openrouter/ai-sdk-provider'
 import type { LanguageModel } from 'ai'
-import { createBrowserOSFetch } from '../lib/browseros-fetch'
+import { resolveProviderHeaders } from '../lib/clients/llm/headers'
 import {
-  createMockBrowserOSLanguageModel,
-  shouldUseMockBrowserOSLLM,
+  createMockLanguageModel,
+  shouldUseMockLLM,
 } from '../lib/clients/llm/mock-language-model'
 import { createCodexFetch } from '../lib/clients/oauth/codex-fetch'
 import { createCopilotFetch } from '../lib/clients/oauth/copilot-fetch'
-import { logger } from '../lib/logger'
 import { createOpenRouterCompatibleFetch } from '../lib/openrouter-fetch'
 import type { ResolvedAgentConfig } from './types'
 
@@ -28,6 +27,7 @@ function createAnthropicFactory(
 ): (modelId: string) => unknown {
   if (!config.apiKey) throw new Error('Anthropic provider requires apiKey')
   return createAnthropic({
+    ...(config.headers && { headers: config.headers }),
     apiKey: config.apiKey,
     ...(config.baseUrl && { baseURL: config.baseUrl }),
   })
@@ -45,6 +45,7 @@ function createOpenAIFactory(
 ): (modelId: string) => unknown {
   if (!config.apiKey) throw new Error('OpenAI provider requires apiKey')
   return createOpenAI({
+    ...(config.headers && { headers: config.headers }),
     apiKey: config.apiKey,
     ...(config.baseUrl && { baseURL: config.baseUrl }),
   })
@@ -55,6 +56,7 @@ function createGoogleFactory(
 ): (modelId: string) => unknown {
   if (!config.apiKey) throw new Error('Google provider requires apiKey')
   return createGoogleGenerativeAI({
+    ...(config.headers && { headers: config.headers }),
     apiKey: config.apiKey,
     ...(config.baseUrl && { baseURL: config.baseUrl }),
   })
@@ -65,6 +67,7 @@ function createOpenRouterFactory(
 ): (modelId: string) => unknown {
   if (!config.apiKey) throw new Error('OpenRouter provider requires apiKey')
   return createOpenRouter({
+    ...(config.headers && { headers: config.headers }),
     apiKey: config.apiKey,
     extraBody: { reasoning: {} },
     fetch: createOpenRouterCompatibleFetch(),
@@ -86,6 +89,7 @@ function createAzureFactory(
     )
   }
   return createAzure({
+    ...(config.headers && { headers: config.headers }),
     apiKey: config.apiKey,
     ...(config.resourceName && { resourceName: config.resourceName }),
     ...(config.baseUrl && { baseURL: config.baseUrl }),
@@ -97,6 +101,7 @@ function createLMStudioFactory(
 ): (modelId: string) => unknown {
   if (!config.baseUrl) throw new Error('LMStudio provider requires baseUrl')
   return createOpenAICompatible({
+    ...(config.headers && { headers: config.headers }),
     name: 'lmstudio',
     baseURL: config.baseUrl,
     ...(config.apiKey && { apiKey: config.apiKey }),
@@ -108,6 +113,7 @@ function createOllamaFactory(
 ): (modelId: string) => unknown {
   if (!config.baseUrl) throw new Error('Ollama provider requires baseUrl')
   return createOpenAICompatible({
+    ...(config.headers && { headers: config.headers }),
     name: 'ollama',
     baseURL: config.baseUrl,
     ...(config.apiKey && { apiKey: config.apiKey }),
@@ -123,49 +129,11 @@ function createBedrockFactory(
     )
   }
   return createAmazonBedrock({
+    ...(config.headers && { headers: config.headers }),
     region: config.region,
     accessKeyId: config.accessKeyId,
     secretAccessKey: config.secretAccessKey,
     sessionToken: config.sessionToken,
-  })
-}
-
-function createBrowserOSFactory(
-  config: ResolvedAgentConfig,
-): (modelId: string) => unknown {
-  if (!config.baseUrl) throw new Error('BrowserOS provider requires baseUrl')
-  const { baseUrl, apiKey, upstreamProvider, browserosId } = config
-  const browserosFetch = browserosId
-    ? createBrowserOSFetch(browserosId)
-    : createOpenRouterCompatibleFetch()
-
-  if (upstreamProvider === LLM_PROVIDERS.OPENROUTER) {
-    return createOpenRouter({
-      baseURL: baseUrl,
-      ...(apiKey && { apiKey }),
-      fetch: browserosFetch,
-    })
-  }
-  if (upstreamProvider === LLM_PROVIDERS.ANTHROPIC) {
-    return createAnthropic({
-      baseURL: baseUrl,
-      ...(apiKey && { apiKey }),
-      fetch: browserosFetch,
-    })
-  }
-  if (upstreamProvider === LLM_PROVIDERS.AZURE) {
-    return createAzure({
-      baseURL: baseUrl,
-      ...(apiKey && { apiKey }),
-      fetch: browserosFetch,
-    })
-  }
-  logger.debug('Creating OpenAI-compatible provider for BrowserOS')
-  return createOpenAICompatible({
-    name: 'browseros',
-    baseURL: baseUrl,
-    ...(apiKey && { apiKey }),
-    fetch: browserosFetch,
   })
 }
 
@@ -175,6 +143,7 @@ function createOpenAICompatibleFactory(
   if (!config.baseUrl)
     throw new Error('OpenAI-compatible provider requires baseUrl')
   return createOpenAICompatible({
+    ...(config.headers && { headers: config.headers }),
     name: 'openai-compatible',
     baseURL: config.baseUrl,
     ...(config.apiKey && { apiKey: config.apiKey }),
@@ -187,6 +156,7 @@ function createMoonshotFactory(
   if (!config.baseUrl) throw new Error('Moonshot provider requires baseUrl')
   if (!config.apiKey) throw new Error('Moonshot provider requires apiKey')
   return createOpenAICompatible({
+    ...(config.headers && { headers: config.headers }),
     name: 'moonshot',
     baseURL: config.baseUrl,
     apiKey: config.apiKey,
@@ -197,6 +167,7 @@ function createQwenCodeFactory(
   config: ResolvedAgentConfig,
 ): (modelId: string) => unknown {
   if (!config.apiKey) throw new Error('Qwen Code requires OAuth authentication')
+  // Managed OAuth provider: user custom headers are deliberately not forwarded.
   return createOpenAICompatible({
     name: 'qwen-code',
     baseURL: EXTERNAL_URLS.QWEN_CODE_API,
@@ -209,6 +180,7 @@ function createGitHubCopilotFactory(
 ): (modelId: string) => unknown {
   if (!config.apiKey)
     throw new Error('GitHub Copilot requires OAuth authentication')
+  // Managed OAuth provider: user custom headers are deliberately not forwarded.
   return createOpenAICompatible({
     name: 'github-copilot',
     baseURL: EXTERNAL_URLS.GITHUB_COPILOT_API,
@@ -221,6 +193,7 @@ function createChatGPTProFactory(
   config: ResolvedAgentConfig,
 ): (modelId: string) => unknown {
   if (!config.apiKey) throw new Error('ChatGPT requires OAuth authentication')
+  // Managed OAuth provider: user custom headers are deliberately not forwarded.
   return createOpenAI({
     apiKey: config.apiKey,
     fetch: createCodexFetch(config.accountId) as typeof globalThis.fetch,
@@ -236,12 +209,36 @@ const PROVIDER_FACTORIES: Record<string, ProviderFactory> = {
   [LLM_PROVIDERS.LMSTUDIO]: createLMStudioFactory,
   [LLM_PROVIDERS.OLLAMA]: createOllamaFactory,
   [LLM_PROVIDERS.BEDROCK]: createBedrockFactory,
-  [LLM_PROVIDERS.BROWSEROS]: createBrowserOSFactory,
   [LLM_PROVIDERS.OPENAI_COMPATIBLE]: createOpenAICompatibleFactory,
   [LLM_PROVIDERS.MOONSHOT]: createMoonshotFactory,
   [LLM_PROVIDERS.CHATGPT_PRO]: createChatGPTProFactory,
   [LLM_PROVIDERS.GITHUB_COPILOT]: createGitHubCopilotFactory,
   [LLM_PROVIDERS.QWEN_CODE]: createQwenCodeFactory,
+}
+
+// Providers whose assistant messages are serialized by @ai-sdk/openai-compatible,
+// which re-emits a reasoning part as the non-standard `reasoning_content` request
+// field. Keep this in sync with the factories above that call
+// createOpenAICompatible. OpenRouter is deliberately excluded: it uses its own
+// provider, and the native Anthropic/OpenAI/Google/Azure/Bedrock providers carry
+// signed or encrypted reasoning that must be replayed, not stripped.
+const OPENAI_COMPATIBLE_SERIALIZER_PROVIDERS: ReadonlySet<string> = new Set([
+  LLM_PROVIDERS.OPENAI_COMPATIBLE,
+  LLM_PROVIDERS.LMSTUDIO,
+  LLM_PROVIDERS.OLLAMA,
+  LLM_PROVIDERS.MOONSHOT,
+  LLM_PROVIDERS.QWEN_CODE,
+  LLM_PROVIDERS.GITHUB_COPILOT,
+])
+
+/**
+ * Whether this provider serializes assistant reasoning as a top-level
+ * `reasoning_content` request field. Strict OpenAI-compatible gateways reject a
+ * replayed `reasoning_content`, so the agent loop strips reasoning from replayed
+ * history for these providers.
+ */
+export function serializesReasoningContent(provider: string): boolean {
+  return OPENAI_COMPATIBLE_SERIALIZER_PROVIDERS.has(provider)
 }
 
 export interface LanguageModelWithCleanup {
@@ -251,11 +248,16 @@ export interface LanguageModelWithCleanup {
 export async function createLanguageModel(
   config: ResolvedAgentConfig,
 ): Promise<LanguageModelWithCleanup> {
-  if (shouldUseMockBrowserOSLLM(config)) {
-    return { model: createMockBrowserOSLanguageModel() }
+  if (shouldUseMockLLM()) {
+    return { model: createMockLanguageModel() }
   }
   const provider = config.provider as string
   const factory = PROVIDER_FACTORIES[provider]
   if (!factory) throw new Error(`Unknown provider: ${provider}`)
-  return { model: factory(config)(config.model) as LanguageModel }
+  return {
+    model: factory({
+      ...config,
+      headers: resolveProviderHeaders(config.headers, config.conversationId),
+    })(config.model) as LanguageModel,
+  }
 }

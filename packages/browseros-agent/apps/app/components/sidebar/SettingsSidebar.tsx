@@ -1,9 +1,9 @@
 import {
+  Activity,
   ArrowLeft,
   BookOpen,
   Bot,
   Compass,
-  CreditCard,
   MessageSquare,
   Monitor,
   Palette,
@@ -12,7 +12,7 @@ import {
 import type { FC } from 'react'
 import { NavLink } from 'react-router'
 import { ThemeToggle } from '@/components/elements/theme-toggle'
-import { Feature } from '@/lib/browseros/capabilities'
+import type { Feature } from '@/lib/browseros/capabilities'
 import { cn } from '@/lib/utils'
 import { useCapabilities } from '@/modules/browseros/capabilities.hooks'
 
@@ -77,12 +77,6 @@ const primarySettingsSections: NavSection[] = [
       },
       { name: 'BrowserOS as MCP', to: '/settings/mcp', icon: Server },
       { name: 'Omarchy', to: '/settings/omarchy', icon: Monitor },
-      {
-        name: 'Usage & Billing',
-        to: '/settings/usage',
-        icon: CreditCard,
-        feature: Feature.CREDITS_SUPPORT,
-      },
     ],
   },
 ]
@@ -90,6 +84,7 @@ const primarySettingsSections: NavSection[] = [
 const helpItems: NavItem[] = [
   { name: 'Docs', href: 'https://docs.browseros.com/', icon: BookOpen },
   { name: 'Features', to: '/features', icon: Compass },
+  { name: 'Diagnostics', to: '/settings/diagnostics', icon: Activity },
 ]
 
 export const SettingsSidebar: FC = () => {

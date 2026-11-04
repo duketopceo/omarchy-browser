@@ -20,7 +20,7 @@ func TestWriteDogfoodSidecarConfigUsesExplicitResourceDirectory(t *testing.T) {
 		},
 		{
 			name:         "BrowserClaw",
-			resourcesDir: "/repo/packages/browseros-agent/apps/claw-server-rust/resources",
+			resourcesDir: "/repo/packages/browseros-agent/apps/claw-server/resources",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -54,6 +54,10 @@ func TestWriteDogfoodSidecarConfigUsesExplicitResourceDirectory(t *testing.T) {
 			directories := got["directories"].(map[string]any)
 			if directories["resources"] != test.resourcesDir || directories["execution"] != "/tmp/browseros-dogfood" {
 				t.Fatalf("unexpected directories: %#v", directories)
+			}
+			flags := got["flags"].(map[string]any)
+			if devMode, ok := flags["devMode"]; !ok || devMode != false {
+				t.Fatalf("dogfood must pin devMode false: %#v", flags)
 			}
 		})
 	}

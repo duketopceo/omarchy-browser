@@ -5,6 +5,22 @@
  */
 
 export interface paths {
+  '/system/diagnostics': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get: operations['getSystemDiagnostics']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
   '/system/health': {
     parameters: {
       query?: never
@@ -13,6 +29,23 @@ export interface paths {
       cookie?: never
     }
     get: operations['getHealth']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/system/ready': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** @description Strict gate for callers that need agent tools to work, rather than only needing the process to answer. Deliberately separate from health so a transient link loss cannot be read as a reason to restart this process. */
+    get: operations['getReadiness']
     put?: never
     post?: never
     delete?: never
@@ -31,6 +64,23 @@ export interface paths {
     get?: never
     put?: never
     post: operations['shutdown']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/extension/update-ready': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /** @description Wake the sidecar to independently inspect the BrowserOS extension's staged update through CDP. The request carries no version and does not itself authorize a reload. Browser origins other than the Neo extension are denied. */
+    post: operations['notifyExtensionUpdateReady']
     delete?: never
     options?: never
     head?: never
@@ -69,6 +119,24 @@ export interface paths {
     patch?: never
     trace?: never
   }
+  '/api/v1/feedback/invitation': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** @description Whether this installation should be shown a feedback call invitation. */
+    get: operations['getFeedbackInvitation']
+    put?: never
+    /** @description Records what happened to the invitation. The first outcome spends this installation's single invitation, so later calls change the recorded outcome without ever granting another. */
+    post: operations['recordFeedbackInvite']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
   '/api/v1/settings/telemetry': {
     parameters: {
       query?: never
@@ -78,6 +146,39 @@ export interface paths {
     }
     get: operations['getTelemetry']
     put: operations['updateTelemetry']
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/settings/agent': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get: operations['getAgentSettings']
+    put: operations['updateAgentSettings']
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/help/events': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** @description Server-Sent Events. Sends an event named `help` at once and then whenever the open help requests change (one is opened, handed back, cancelled, consumed by the agent, or reaches its time limit). Each event's data is `{"version": <number>}` and carries no request details: read `GET /api/v1/sessions?status=live` for the requests themselves. */
+    get: operations['streamHelpEvents']
+    put?: never
     post?: never
     delete?: never
     options?: never
@@ -128,6 +229,23 @@ export interface paths {
     get?: never
     put?: never
     post: operations['cancelSession']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/sessions/{sessionId}/help/resolve': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /** @description Hand control back to a waiting agent after a human has taken over its page. */
+    post: operations['resolveHelp']
     delete?: never
     options?: never
     head?: never
@@ -262,6 +380,40 @@ export interface paths {
     patch?: never
     trace?: never
   }
+  '/api/v1/claude-desktop/extension': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** @description Whether the Claude desktop app and its BrowserOS neo extension are installed, read from Claude's own record of installed extensions. */
+    get: operations['getClaudeDesktopExtension']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/claude-desktop/extension/install': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /** @description Fetches the pinned extension bundle, checks its hash, and opens it in the Claude desktop app, which shows its own install sheet for the person to confirm. Nothing is installed without that confirmation. */
+    post: operations['installClaudeDesktopExtension']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
   '/api/v1/audit/storage': {
     parameters: {
       query?: never
@@ -307,6 +459,26 @@ export interface paths {
     put?: never
     /** Apply the current retention policy immediately and reclaim disk space. */
     post: operations['runAuditCleanup']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/audit/agents': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * Every agent that has a task in the audit history.
+     * @description One entry per agent slug, most tasks first. Covers the whole history, not one page, so a client can offer every agent as a filter.
+     */
+    get: operations['listAuditAgents']
+    put?: never
+    post?: never
     delete?: never
     options?: never
     head?: never
@@ -359,6 +531,40 @@ export interface paths {
     get: operations['listSkillRuns']
     put?: never
     post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/skills/{name}/flow': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** @description The skill's ultrafast flow file. */
+    get: operations['getSkillFlow']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/skills/{name}/ultrafast/approve-write': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /** @description Let the skill's write flow run without asking again. */
+    post: operations['approveSkillWrite']
     delete?: never
     options?: never
     head?: never
@@ -426,12 +632,33 @@ export interface components {
       requestId?: string
     }
     HealthResponse: {
-      /** @enum {string} */
+      /**
+       * @description Reports only that this process is serving. It stays `ok` while the browser link is down, because the supervisor restarts the server on a non-200 and a restart cannot restore a link the operating system tore down. Read `browser` for whether agent tools can actually run.
+       * @enum {string}
+       */
       status: 'ok'
+      browser?: components['schemas']['BrowserLink']
+    }
+    /** @description The server's live connection to the browser it drives. */
+    BrowserLink: {
+      connected: boolean
+      /**
+       * Format: int64
+       * @description Milliseconds since the link was lost, while the server reconnects. Absent when connected.
+       */
+      downForMs: number | null
+      /** @description Why the link was last lost, when known. */
+      lastError: string | null
     }
     ShutdownResponse: {
       /** @enum {string} */
       status: 'ok'
+    }
+    SystemDiagnostics: {
+      version: string
+      os: string
+      /** @description User-facing OS release; unavailable when it cannot be determined. */
+      osVersion: string | null
     }
     SystemInfo: {
       product: string
@@ -439,6 +666,7 @@ export interface components {
       /** Format: uri */
       url: string
       capabilities?: components['schemas']['SystemCapabilities']
+      schema?: components['schemas']['SchemaStatus']
     }
     SystemCapabilities: {
       /**
@@ -452,6 +680,47 @@ export interface components {
        * @description Maximum UTF-8 encoded request-body bytes accepted by canonical recording ingest.
        */
       recordingIngestMaxBytes?: number
+    }
+    /** @description How the data this server opened compares to the schema this build knows. When the database was migrated by a newer BrowserOS neo, the server runs read-forward on the columns it understands and reports the migrations it does not have, so the app can prompt the user to update BrowserOS neo to match its data. */
+    SchemaStatus: {
+      /** @description True when the database carries applied migrations this build does not contain. */
+      databaseAhead: boolean
+      /** @description Names of the applied migrations this build does not know. Empty unless databaseAhead is true. */
+      unknownMigrations: string[]
+    }
+    /** @description One live view a cockpit card asks for on the `/api/v1/screencasts` WebSocket: a session's current tab, or one tab of it. */
+    ScreencastWatch: {
+      sessionId: string
+      /**
+       * Format: int64
+       * @description Show this tab of the session; omitted follows the session's current tab.
+       */
+      browserTabId?: number
+    }
+    /** @description Client-to-server text message on the `/api/v1/screencasts` WebSocket. It names every watch the page wants and replaces the previous set; the server sends frames only for watches in the latest set. */
+    ScreencastWatchMessage: {
+      watch: components['schemas']['ScreencastWatch'][]
+    }
+    /** @description The JSON header of one server-to-client binary message on the `/api/v1/screencasts` WebSocket. A message is a big-endian u32 header length, this header, then the JPEG. */
+    ScreencastFrameHeader: {
+      /** @description The watched session, as the watch named it. */
+      sessionId: string
+      /**
+       * Format: int64
+       * @description The watched tab, as the watch named it; omitted when the watch follows the session.
+       */
+      browserTabId?: number
+      /**
+       * Format: int64
+       * @description The browser tab the frame shows.
+       */
+      tabId: number
+      url: string
+      /**
+       * Format: int64
+       * @description When the browser captured the frame, Unix epoch ms.
+       */
+      capturedAt: number
     }
     CockpitStats: {
       hasMeasuredStats: boolean
@@ -473,6 +742,23 @@ export interface components {
       /** Format: int64 */
       toolCallCount: number
     }
+    /**
+     * @description shown is recorded when the card first reaches the screen, which is also what spends the installation's single invitation; clicked and dismissed record what the reader did with it afterwards.
+     * @enum {string}
+     */
+    FeedbackInviteOutcome: 'shown' | 'clicked' | 'dismissed'
+    FeedbackInvitation: {
+      /** @description Whether this installation should be offered a feedback call right now. False is returned for every refusal without saying which one applied. */
+      eligible: boolean
+      /**
+       * Format: uri
+       * @description Where the invitation points. Present only when eligible.
+       */
+      bookUrl?: string
+    }
+    RecordFeedbackInviteRequest: {
+      outcome: components['schemas']['FeedbackInviteOutcome']
+    }
     TelemetryState: {
       distinctId: string
       enabled: boolean
@@ -481,6 +767,19 @@ export interface components {
     UpdateTelemetryRequest: {
       consent: boolean
     }
+    /** @description User settings for the tools BrowserOS neo offers to agents. */
+    AgentSettings: {
+      /** @description Whether agents are offered request_human_help and await_human_help. When false, agents are told to report a block in their own chat instead. */
+      humanHelpEnabled: boolean
+      /** @description Whether successful MCP tool replies include a tip to close the task's tab group when finished. */
+      taskCleanupTipEnabled: boolean
+    }
+    UpdateAgentSettingsRequest: {
+      /** @description Omit to preserve the saved human help preference. */
+      humanHelpEnabled?: boolean
+      /** @description Omit to preserve the saved cleanup tip preference. */
+      taskCleanupTipEnabled?: boolean
+    }
     /** @enum {string} */
     SessionStatus: 'live' | 'done' | 'failed' | 'cancelled'
     /** @enum {string} */
@@ -488,6 +787,8 @@ export interface components {
     LiveSessionState: {
       state: components['schemas']['LiveSessionActivityState']
       browserTabs: components['schemas']['SessionBrowserTab'][]
+      /** @description Present only while the agent is waiting for human help on this session. */
+      helpRequest?: components['schemas']['HelpRequest']
     }
     SessionBrowserTab: {
       /** Format: int64 */
@@ -606,6 +907,33 @@ export interface components {
       /** Format: int64 */
       cancelledDispatches: number
     }
+    /** @enum {string} */
+    HelpRequestKind: 'login' | 'captcha' | 'approval' | 'other'
+    /** @description A pending request for human help from a blocked agent (sign-in, captcha, an approval it should not make). The agent waits until a human takes over the page and hands control back. */
+    HelpRequest: {
+      requestId: string
+      reason: string
+      details?: string
+      resumeHint?: string
+      kind?: components['schemas']['HelpRequestKind']
+      /**
+       * Format: int64
+       * @description The browser tab the human should take over.
+       */
+      browserTabId: number
+      url?: string
+      title?: string
+      /** Format: int64 */
+      requestedAt: number
+    }
+    /** @description Hand control back to the waiting agent, optionally with a note for it. */
+    ResolveHelpRequest: {
+      note?: string
+    }
+    ResolveHelpResponse: {
+      /** @description True when a pending request was found and signalled to resume. */
+      resolved: boolean
+    }
     RecordingMetadata: {
       hasData: boolean
       /** @description False when any selected segment has a known gap or legacy boundaries. */
@@ -672,6 +1000,26 @@ export interface components {
     ConnectionList: {
       items: components['schemas']['Connection'][]
     }
+    ClaudeDesktopExtension: {
+      /** @description Whether the Claude desktop app is installed on this computer. */
+      claudeInstalled: boolean
+      /** @description Whether Claude has the BrowserOS neo extension installed. */
+      installed: boolean
+      /** @description The extension version Claude has installed. Present only when installed. */
+      installedVersion?: string
+      /** @description The extension version this server installs. */
+      availableVersion: string
+      /** @description Whether the installed extension is older than the available one. */
+      updateAvailable: boolean
+    }
+    /**
+     * @description opened means the extension file was handed to Claude, which now shows its own install sheet; missing means the Claude desktop app was not found.
+     * @enum {string}
+     */
+    ClaudeDesktopInstallStatus: 'opened' | 'missing'
+    ClaudeDesktopInstallResult: {
+      status: components['schemas']['ClaudeDesktopInstallStatus']
+    }
     /**
      * @description keepForever never deletes audit data automatically; deleteAfterDays removes audit data older than the accompanying days value.
      * @enum {string}
@@ -728,6 +1076,23 @@ export interface components {
       bytesReclaimed: number
       usage: components['schemas']['AuditStorageUsage']
     }
+    AuditAgent: {
+      /** @description The agent's slug, the value the session list's `slug` filter takes. */
+      slug: string
+      /** @description The display label from the agent's most recent task. */
+      label: string
+      /** Format: int64 */
+      taskCount: number
+      /**
+       * Format: int64
+       * @description Start of the agent's most recent task, in epoch milliseconds.
+       */
+      lastStartedAt: number
+    }
+    AuditAgentList: {
+      /** @description Ordered by task count, then by the most recent task. */
+      items: components['schemas']['AuditAgent'][]
+    }
     /**
      * @description How the skill came to exist. `agent` authored via the MCP tool, `manual` created or edited by the user, `directory` installed from the catalog.
      * @enum {string}
@@ -773,6 +1138,7 @@ export interface components {
       /** Format: int64 */
       updatedAt: number
       tokenSavings?: components['schemas']['SkillTokenSavings']
+      ultrafast?: components['schemas']['SkillUltrafast']
     }
     SkillList: {
       items: components['schemas']['Skill'][]
@@ -794,6 +1160,14 @@ export interface components {
       clean: boolean
       /** @description The tool that failed, when the run is not clean. */
       erroredTool?: string
+      mode?: components['schemas']['SkillRunMode']
+      /**
+       * Format: int64
+       * @description The step the flow handed back at, for a handed_back run.
+       */
+      handoverStep?: number
+      /** @enum {string} */
+      handoverCause?: 'site_changed' | 'input_only' | 'transient' | 'unknown'
       /** Format: int64 */
       createdAt: number
     }
@@ -834,6 +1208,44 @@ export interface components {
        */
       measuredRunCount: number
     }
+    /**
+     * @description Where the skill's ultrafast flow stands. `none` means it has no flow and has not been offered one.
+     * @enum {string}
+     */
+    SkillUltrafastStatus:
+      | 'none'
+      | 'pending'
+      | 'verified'
+      | 'degraded'
+      | 'broken'
+      | 'off'
+    /** @description The skill's ultrafast flow. Present only while ultrafast skills are enabled. */
+    SkillUltrafast: {
+      status: components['schemas']['SkillUltrafastStatus']
+      /** @description Why the flow is off or broken, in plain words. */
+      reason?: string
+      /** Format: int64 */
+      flowVersion: number
+      /** @enum {string} */
+      effects?: 'read' | 'write'
+      /** @description Whether the user approved this write flow to run without asking. */
+      writeApproved: boolean
+      /** Format: int64 */
+      p50Ms?: number
+      /** Format: int64 */
+      verifiedAt?: number
+      /** Format: int64 */
+      repairedAt?: number
+    }
+    SkillFlowSource: {
+      /** @description The flow.md file as stored beside SKILL.md. */
+      source: string
+    }
+    /**
+     * @description How the run was carried out. `handed_back` means the flow stopped and the agent finished the task.
+     * @enum {string}
+     */
+    SkillRunMode: 'ultrafast' | 'handed_back' | 'agent'
     SkillCreate: {
       name: string
       description: string
@@ -963,6 +1375,27 @@ export interface components {
 }
 export type $defs = Record<string, never>
 export interface operations {
+  getSystemDiagnostics: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Public server version and operating-system release for support diagnostics. */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['SystemDiagnostics']
+        }
+      }
+      500: components['responses']['InternalError']
+    }
+  }
   getHealth: {
     parameters: {
       query?: never
@@ -972,7 +1405,7 @@ export interface operations {
     }
     requestBody?: never
     responses: {
-      /** @description The server is ready. */
+      /** @description This process is serving. Always 200 while it can answer, including while the browser link is down; inspect `browser` to tell those apart. */
       200: {
         headers: {
           [name: string]: unknown
@@ -982,6 +1415,36 @@ export interface operations {
         }
       }
       500: components['responses']['InternalError']
+    }
+  }
+  getReadiness: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description The server holds a live link to the browser. */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HealthResponse']
+        }
+      }
+      500: components['responses']['InternalError']
+      /** @description The server is serving but has no live link to the browser. */
+      503: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HealthResponse']
+        }
+      }
     }
   }
   shutdown: {
@@ -1003,6 +1466,33 @@ export interface operations {
         }
       }
       500: components['responses']['InternalError']
+    }
+  }
+  notifyExtensionUpdateReady: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Notification accepted; activation is asynchronous. */
+      204: {
+        headers: {
+          [name: string]: unknown
+        }
+        content?: never
+      }
+      /** @description Untrusted browser origin. */
+      403: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ApiError']
+        }
+      }
     }
   }
   getSystemInfo: {
@@ -1044,6 +1534,53 @@ export interface operations {
           'application/json': components['schemas']['CockpitStats']
         }
       }
+      500: components['responses']['InternalError']
+    }
+  }
+  getFeedbackInvitation: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description The invitation decision for this installation. */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['FeedbackInvitation']
+        }
+      }
+      500: components['responses']['InternalError']
+    }
+  }
+  recordFeedbackInvite: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['RecordFeedbackInviteRequest']
+      }
+    }
+    responses: {
+      /** @description The invitation decision after recording the outcome. */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['FeedbackInvitation']
+        }
+      }
+      400: components['responses']['BadRequest']
       500: components['responses']['InternalError']
     }
   }
@@ -1094,6 +1631,73 @@ export interface operations {
       500: components['responses']['InternalError']
     }
   }
+  getAgentSettings: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Current agent settings. */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['AgentSettings']
+        }
+      }
+      500: components['responses']['InternalError']
+    }
+  }
+  updateAgentSettings: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['UpdateAgentSettingsRequest']
+      }
+    }
+    responses: {
+      /** @description Updated agent settings. */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['AgentSettings']
+        }
+      }
+      400: components['responses']['BadRequest']
+      500: components['responses']['InternalError']
+    }
+  }
+  streamHelpEvents: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description A stream of `help` events until the client disconnects. */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'text/event-stream': string
+        }
+      }
+    }
+  }
   listSessions: {
     parameters: {
       query?: {
@@ -1101,6 +1705,8 @@ export interface operations {
         slug?: string
         /** @description Use `live` to request a complete current snapshot with live browser state. */
         status?: components['schemas']['SessionStatus']
+        /** @description Only tasks that failed or were stopped. Applied before pagination, so pages stay full. */
+        needsAttention?: boolean
         site?: string
         search?: string
         since?: number
@@ -1174,6 +1780,34 @@ export interface operations {
       }
       404: components['responses']['NotFound']
       409: components['responses']['Conflict']
+      500: components['responses']['InternalError']
+    }
+  }
+  resolveHelp: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        sessionId: components['parameters']['SessionId']
+      }
+      cookie?: never
+    }
+    requestBody?: {
+      content: {
+        'application/json': components['schemas']['ResolveHelpRequest']
+      }
+    }
+    responses: {
+      /** @description The waiting agent was signalled to resume, or no pending request was found. */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ResolveHelpResponse']
+        }
+      }
+      400: components['responses']['BadRequest']
       500: components['responses']['InternalError']
     }
   }
@@ -1264,6 +1898,8 @@ export interface operations {
   getSessionPreview: {
     parameters: {
       query?: {
+        /** @description Capture this currently session-owned browser tab. Omitted follows the most recently active owned tab; an unavailable or unowned tab returns 404. */
+        browserTabId?: number
         /** @description Ignored client cache-busting token for preview URLs. */
         refresh?: number
       }
@@ -1275,7 +1911,7 @@ export interface operations {
     }
     requestBody?: never
     responses: {
-      /** @description Fresh viewport JPEG from the session's most recently active currently owned browser tab. */
+      /** @description Fresh viewport JPEG from the selected currently owned browser tab, or the most recently active owned tab when no selection is supplied. */
       200: {
         headers: {
           [name: string]: unknown
@@ -1436,6 +2072,48 @@ export interface operations {
       500: components['responses']['InternalError']
     }
   }
+  getClaudeDesktopExtension: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Claude desktop app and extension state. */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ClaudeDesktopExtension']
+        }
+      }
+      500: components['responses']['InternalError']
+    }
+  }
+  installClaudeDesktopExtension: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description The bundle was opened in Claude, or Claude was not found. */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ClaudeDesktopInstallResult']
+        }
+      }
+      500: components['responses']['InternalError']
+    }
+  }
   getAuditStorage: {
     parameters: {
       query?: never
@@ -1499,6 +2177,27 @@ export interface operations {
         }
         content: {
           'application/json': components['schemas']['AuditCleanupResult']
+        }
+      }
+      500: components['responses']['InternalError']
+    }
+  }
+  listAuditAgents: {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description The agents that ran at least one task. */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['AuditAgentList']
         }
       }
       500: components['responses']['InternalError']
@@ -1652,6 +2351,55 @@ export interface operations {
       }
       400: components['responses']['BadRequest']
       404: components['responses']['NotFound']
+      500: components['responses']['InternalError']
+    }
+  }
+  getSkillFlow: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        name: components['parameters']['SkillName']
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description The flow source. */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['SkillFlowSource']
+        }
+      }
+      404: components['responses']['NotFound']
+      500: components['responses']['InternalError']
+    }
+  }
+  approveSkillWrite: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        name: components['parameters']['SkillName']
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description The skill with its updated ultrafast state. */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['Skill']
+        }
+      }
+      404: components['responses']['NotFound']
+      409: components['responses']['Conflict']
       500: components['responses']['InternalError']
     }
   }

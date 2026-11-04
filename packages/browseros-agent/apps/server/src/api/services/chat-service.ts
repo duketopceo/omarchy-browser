@@ -55,6 +55,7 @@ import type {
   HydratedChatRequest,
 } from '../types'
 import { resolveBrowserContextPageIds } from '../utils/resolve-browser-context-page-ids'
+import { shouldPersist } from './chat-persistence-mode'
 import {
   describeMcpChange,
   describeModeChange,
@@ -165,9 +166,14 @@ export class ChatService {
 
   subscribe(
     conversationId: string,
+    runId?: string,
   ): ReadableStream<UIMessageChunk> | undefined {
     if (!this.conversationRuns.getSnapshot(conversationId)) return undefined
-    return this.conversationRuns.subscribe(conversationId)
+    return this.conversationRuns.subscribe(conversationId, runId)
+  }
+
+  removePanelTab(tabId: number): void {
+    this.conversationRuns.removePanelTab(tabId)
   }
 
   async stop(conversationId: string): Promise<boolean> {
@@ -197,6 +203,7 @@ export class ChatService {
       model: llmConfig.model,
       apiKey: llmConfig.apiKey,
       baseUrl: llmConfig.baseUrl,
+      headers: llmConfig.headers,
       upstreamProvider: llmConfig.upstreamProvider,
       resourceName: llmConfig.resourceName,
       region: llmConfig.region,
@@ -352,7 +359,7 @@ export class ChatService {
     }
 
     if (isNewSession) {
-      if (request.historyMode === 'local') {
+      if (shouldPersist(request)) {
         const stored = await this.getConversationStore().get(
           request.conversationId,
         )
@@ -481,7 +488,7 @@ export class ChatService {
             turnCompleted,
           })
 
-          if (request.historyMode === 'local' && turnCompleted) {
+          if (shouldPersist(request) && turnCompleted) {
             await this.persistConversation({
               id: request.conversationId,
               messages: session.agent.messages,
@@ -686,9 +693,16 @@ export class ChatService {
     browserContext: BrowserContext | undefined,
   ): BrowserToolLease {
     const readOnly = request.mode === 'chat'
-    const fingerprint = JSON.stringify({ agentId, readOnly, browserContext })
+    // Only the agent identity and the read-only flag require a new capability.
+    // The browser context is refreshed in place instead: re-minting the token
+    // on every context change restarts the ACP agent process, and a custom
+    // agent re-opens its workspace window on each fresh connection.
+    const fingerprint = JSON.stringify({ agentId, readOnly })
     const existing = this.acpToolLeases.get(request.conversationId)
-    if (existing?.fingerprint === fingerprint) return existing.lease
+    if (existing?.fingerprint === fingerprint) {
+      existing.lease.updateBrowserContext(browserContext)
+      return existing.lease
+    }
 
     existing?.lease.revoke()
     const outputFileAccess =
@@ -861,12 +875,8 @@ class ChatRequestError extends Error {
 }
 
 function browserContextTabIds(browserContext?: BrowserContext): number[] {
-  if (!browserContext) return []
-  const tabIds = new Set<number>()
-  if (browserContext.activeTab) tabIds.add(browserContext.activeTab.id)
-  for (const tab of browserContext.selectedTabs ?? []) tabIds.add(tab.id)
-  for (const tab of browserContext.tabs ?? []) tabIds.add(tab.id)
-  return [...tabIds]
+  // Selected/context tabs provide input, not ownership of their panels.
+  return browserContext?.activeTab ? [browserContext.activeTab.id] : []
 }
 
 function conversationTabGroup(

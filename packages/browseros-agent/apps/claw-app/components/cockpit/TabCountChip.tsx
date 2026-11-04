@@ -1,87 +1,90 @@
 import type { SessionBrowserTab } from '@browseros/claw-api'
-import { Layers } from 'lucide-react'
+import { ArrowUpRight, ChevronDown } from 'lucide-react'
 import { useState } from 'react'
+import { Favicon } from '@/components/favicon/Favicon'
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
 } from '@/components/ui/popover'
+import { cn } from '@/lib/utils'
 import { siteOf } from '@/screens/cockpit/cockpit.helpers'
 
 interface TabCountChipProps {
   browserTabs: SessionBrowserTab[]
-  /** The tab currently surfaced on the card. */
-  selectedBrowserTabId: number
-  /** The session's live target tab, marked "on screen" in the list. */
-  liveBrowserTabId?: number
-  onSelectTab: (browserTabId: number) => void
+  /** The tab the card's preview shows, marked with a dot in the list. */
+  onScreenBrowserTabId?: number
+  /** Brings that browser tab to the front of its window. */
+  onGoToTab: (browserTabId: number) => void
 }
 
 /**
- * Switches which owned tab the card previews. Each row selects that tab; the
- * shown tab is highlighted and the session's live target is marked "on screen".
+ * How many tabs an agent is working in, as quiet text that opens the list of
+ * them. Picking a row takes the person to that browser tab.
  */
 export function TabCountChip({
   browserTabs,
-  selectedBrowserTabId,
-  liveBrowserTabId,
-  onSelectTab,
+  onScreenBrowserTabId,
+  onGoToTab,
 }: TabCountChipProps) {
   const [open, setOpen] = useState(false)
   if (browserTabs.length <= 1) return null
   return (
-    <Popover onOpenChange={setOpen} open={open}>
+    <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger
         data-tab-count={browserTabs.length}
-        className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border-2 bg-card px-1.5 py-[1.5px] font-bold text-[10px] text-ink-2 uppercase tracking-wider transition hover:border-border-strong"
+        className="inline-flex shrink-0 cursor-pointer items-center gap-[3px] rounded-sm font-semibold text-ink leading-[18px] outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
-        <Layers className="size-2.5" />
         {browserTabs.length} tabs
+        <ChevronDown
+          aria-hidden
+          strokeWidth={2.25}
+          className={cn(
+            'size-3 text-ink-2 transition-transform',
+            open && 'rotate-180',
+          )}
+        />
       </PopoverTrigger>
-      <PopoverContent className="ph-no-capture w-72 p-1.5" align="end">
-        <ul className="flex flex-col gap-0.5">
+      {/* The list portals out of the card's ph-no-capture section, so it carries its own. */}
+      <PopoverContent
+        align="start"
+        alignOffset={-2}
+        sideOffset={8}
+        className="ph-no-capture max-h-(--available-height) w-[270px] gap-px overflow-y-auto rounded-xl border border-border-2 bg-card p-[5px] shadow-pop ring-0"
+      >
+        <ul className="flex flex-col gap-px">
           {browserTabs.map((tab) => {
-            const selected = tab.browserTabId === selectedBrowserTabId
-            const isLive = tab.browserTabId === liveBrowserTabId
+            const title = tab.title || siteOf(tab.url)
+            const onScreen = tab.browserTabId === onScreenBrowserTabId
             return (
               <li key={tab.browserTabId}>
                 <button
                   type="button"
-                  aria-current={selected}
-                  data-select-browser-tab={tab.browserTabId}
+                  aria-label={`Go to ${title}`}
+                  aria-current={onScreen || undefined}
+                  data-go-to-browser-tab={tab.browserTabId}
                   onClick={() => {
-                    onSelectTab(tab.browserTabId)
+                    onGoToTab(tab.browserTabId)
                     setOpen(false)
                   }}
-                  className={
-                    selected
-                      ? 'flex w-full items-start gap-2 rounded-md bg-card-tint px-2 py-1.5 text-left'
-                      : 'flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition hover:bg-bg-sunken'
-                  }
+                  className="group/row flex w-full cursor-pointer items-center gap-[9px] rounded-md px-2 py-[7px] text-left outline-none hover:bg-card-tint focus-visible:bg-card-tint"
                 >
+                  <Favicon site={tab.url} className="size-4 rounded-[4px]" />
+                  <span className="min-w-0 flex-1 truncate text-[13.5px] text-cyanotype-ink leading-[17px]">
+                    {title}
+                  </span>
                   <span
                     aria-hidden
-                    className={
-                      selected
-                        ? 'mt-1 size-1.5 shrink-0 rounded-full bg-accent'
-                        : 'mt-1 size-1.5 shrink-0 rounded-full bg-ink-4'
-                    }
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate font-semibold text-[12px]">
-                      {tab.title || siteOf(tab.url)}
-                    </div>
-                    <div className="truncate font-mono text-[10.5px] text-ink-3">
-                      {[tab.lastToolName, siteOf(tab.url)]
-                        .filter(Boolean)
-                        .join(' · ')}
-                    </div>
-                  </div>
-                  {isLive && (
-                    <span className="mt-0.5 shrink-0 font-mono text-[9px] text-accent uppercase tracking-[0.08em]">
-                      on screen
-                    </span>
-                  )}
+                    className="flex w-3.5 shrink-0 justify-center"
+                  >
+                    {onScreen ? (
+                      <span className="size-1.5 rounded-full bg-primary group-hover/row:hidden group-focus-visible/row:hidden" />
+                    ) : null}
+                    <ArrowUpRight
+                      strokeWidth={2.25}
+                      className="hidden size-3 text-ink-2 group-hover/row:block group-focus-visible/row:block"
+                    />
+                  </span>
                 </button>
               </li>
             )

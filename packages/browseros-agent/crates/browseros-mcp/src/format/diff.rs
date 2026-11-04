@@ -1,4 +1,5 @@
 use crate::{
+    format::coverage::{coverage_warning, insert_coverage, with_warning},
     framework::ToolCtx,
     output_file::write_temp_tool_output_file,
     token_estimate::{estimate_text_tokens, slice_text_by_estimated_tokens},
@@ -10,13 +11,45 @@ use serde_json::{Value, json};
 const MAX_INLINE_DIFF_TOKENS: usize = 10_000;
 const MAX_INLINE_EXCERPT_TOKENS: usize = 5_000;
 
+/// How much of a changed diff to render. `Full` is the token-bounded inline diff
+/// with spill-to-file; `Summary` returns only change counts; `MaxChars` caps the
+/// inline diff to that many characters, spilling the rest to a file (mirrors the
+/// evaluate maxChars control) (#2700).
+#[derive(Debug, Clone, Copy)]
+pub enum DiffDetail {
+    Full,
+    Summary,
+    MaxChars(usize),
+}
+
 #[derive(Debug, Clone)]
 pub struct FormattedDiff {
     pub text: String,
     pub structured: Value,
 }
 
-pub async fn format_diff_result(diff: &SnapshotDiff, origin: &str, ctx: &ToolCtx) -> FormattedDiff {
+/// The diff as `detail` asks, under a warning whenever the capture was partial or a frame was
+/// left out of the comparison. That warning and the coverage fields survive every detail level,
+/// since a summarized or cut-down diff must not read as a complete one.
+pub async fn format_diff_result(
+    diff: &SnapshotDiff,
+    origin: &str,
+    ctx: &ToolCtx,
+    detail: DiffDetail,
+) -> FormattedDiff {
+    let mut formatted = format_diff_body(diff, origin, ctx, detail).await;
+    let warning = coverage_warning(&diff.coverage, &diff.uncompared);
+    formatted.text = with_warning(warning.as_deref(), formatted.text);
+    insert_coverage(&mut formatted.structured, &diff.coverage, &diff.uncompared);
+    formatted
+}
+
+async fn format_diff_body(
+    diff: &SnapshotDiff,
+    origin: &str,
+    ctx: &ToolCtx,
+    detail: DiffDetail,
+) -> FormattedDiff {
     if !diff.changed {
         return FormattedDiff {
             text: "no change since last snapshot".to_string(),
@@ -36,6 +69,13 @@ pub async fn format_diff_result(diff: &SnapshotDiff, origin: &str, ctx: &ToolCtx
         "added": diff.added,
         "removed": diff.removed
     });
+    // Text moving and controls moving are different claims. Saying which one
+    // this was keeps a ticking countdown from reading as a page that acted.
+    if let Some(moved) = diff.arrangement_changed
+        && let Value::Object(object) = &mut structured
+    {
+        object.insert("arrangementChanged".to_string(), Value::Bool(moved));
+    }
     if diff.url_changed
         && let Value::Object(object) = &mut structured
     {
@@ -56,6 +96,23 @@ pub async fn format_diff_result(diff: &SnapshotDiff, origin: &str, ctx: &ToolCtx
         );
     }
 
+    match detail {
+        DiffDetail::Summary => return summary_result(diff, structured),
+        DiffDetail::MaxChars(max_chars) => {
+            return cap_inline_diff(
+                diff,
+                diff_text,
+                wrapped_diff,
+                origin,
+                structured,
+                max_chars,
+                ctx,
+            )
+            .await;
+        }
+        DiffDetail::Full => {}
+    }
+
     if token_estimate > MAX_INLINE_DIFF_TOKENS {
         let excerpt = slice_text_by_estimated_tokens(diff_text, MAX_INLINE_EXCERPT_TOKENS);
         let content_length = wrapped_diff.len();
@@ -63,12 +120,12 @@ pub async fn format_diff_result(diff: &SnapshotDiff, origin: &str, ctx: &ToolCtx
             Ok(path) => {
                 let summary = if diff.url_changed {
                     format!(
-                        "URL changed; full current snapshot is {token_estimate} estimated tokens, over the {MAX_INLINE_DIFF_TOKENS}-token inline limit, saved to: {}\nRead the file for the full current snapshot.",
+                        "URL changed; full current snapshot is {token_estimate} estimated tokens, over the {MAX_INLINE_DIFF_TOKENS}-token inline limit, saved to: {}\nUse read_output for the full current snapshot.",
                         path.display()
                     )
                 } else {
                     format!(
-                        "Diff is {token_estimate} estimated tokens, over the {MAX_INLINE_DIFF_TOKENS}-token inline limit, saved to: {}\nRead the file for the full diff.",
+                        "Diff is {token_estimate} estimated tokens, over the {MAX_INLINE_DIFF_TOKENS}-token inline limit, saved to: {}\nUse read_output for the full diff.",
                         path.display()
                     )
                 };
@@ -143,6 +200,109 @@ pub async fn format_diff_result(diff: &SnapshotDiff, origin: &str, ctx: &ToolCtx
     FormattedDiff {
         text: wrapped_diff,
         structured,
+    }
+}
+
+fn summary_result(diff: &SnapshotDiff, structured: Value) -> FormattedDiff {
+    let counts = format!("{} added, {} removed", diff.added, diff.removed);
+    let text = if diff.url_changed {
+        format!(
+            "URL changed ({} -> {}); {counts}. Take a snapshot for the current state.",
+            diff.before_url.as_deref().unwrap_or("?"),
+            diff.after_url.as_deref().unwrap_or("?")
+        )
+    } else {
+        format!("changed: {counts}. Take a snapshot to see details.")
+    };
+    FormattedDiff { text, structured }
+}
+
+/// Caps a changed diff to a caller-supplied character budget: returns it whole when
+/// it fits, otherwise an inline excerpt plus the full diff written to a local output
+/// file. Char-based to mirror the evaluate maxChars control (#2700). When the action
+/// navigated, diff.text is the new page's snapshot, so the navigation notice is kept
+/// here just as the full and summary modes do (a truncated snapshot must not read as
+/// an ordinary in-page diff).
+async fn cap_inline_diff(
+    diff: &SnapshotDiff,
+    diff_text: &str,
+    wrapped_diff: String,
+    origin: &str,
+    mut structured: Value,
+    max_chars: usize,
+    ctx: &ToolCtx,
+) -> FormattedDiff {
+    let nav_note = if diff.url_changed {
+        format!(
+            "URL changed ({} -> {}); the content below is the new page's current snapshot, not an in-page diff.\n",
+            diff.before_url.as_deref().unwrap_or("?"),
+            diff.after_url.as_deref().unwrap_or("?")
+        )
+    } else {
+        String::new()
+    };
+    let (noun, noun_lower) = if diff.url_changed {
+        ("Snapshot", "snapshot")
+    } else {
+        ("Diff", "diff")
+    };
+
+    if diff_text.chars().count() <= max_chars {
+        return FormattedDiff {
+            text: format!("{nav_note}{wrapped_diff}"),
+            structured,
+        };
+    }
+
+    let excerpt_src: String = diff_text.chars().take(max_chars).collect();
+    let excerpt = wrap_untrusted(&excerpt_src, origin);
+    let content_length = wrapped_diff.len();
+    match write_temp_tool_output_file(&ctx.output_files, "diff", "md", &wrapped_diff).await {
+        Ok(path) => {
+            add_fields(
+                &mut structured,
+                json!({
+                    "truncated": true,
+                    "path": path.to_string_lossy(),
+                    "contentLength": content_length,
+                    "writtenToFile": true
+                }),
+            );
+            FormattedDiff {
+                text: [
+                    format!(
+                        "{nav_note}{noun} truncated at {max_chars} chars. Full {noun_lower} ({content_length} chars) saved to: {}",
+                        path.display()
+                    ),
+                    excerpt,
+                ]
+                .join("\n"),
+                structured,
+            }
+        }
+        Err(err) => {
+            let save_error = err.to_string();
+            add_fields(
+                &mut structured,
+                json!({
+                    "truncated": true,
+                    "contentLength": content_length,
+                    "writtenToFile": false,
+                    "outputWriteFailed": true,
+                    "error": save_error
+                }),
+            );
+            FormattedDiff {
+                text: [
+                    format!(
+                        "{nav_note}{noun} truncated at {max_chars} chars. Full {noun_lower} ({content_length} chars) could not be saved to a BrowserOS output file: {save_error}"
+                    ),
+                    excerpt,
+                ]
+                .join("\n"),
+                structured,
+            }
+        }
     }
 }
 

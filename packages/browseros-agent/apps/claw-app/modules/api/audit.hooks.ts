@@ -6,19 +6,23 @@
  * Session audit surface for the cockpit and audit screens.
  *
  * useSessions        paginated session history (homepage + audit screen)
+ * useAuditAgents     every agent in the history, for the agent filter
  * useLiveSessions    complete connected-session snapshot for Running now
+ * useLiveSessionState one live session's activity, read from that snapshot
  * useSessionDetail   one session's summary + full dispatch list;
  *                    polls only while the session is live
  *
- * The URL helpers let <img src> render binary JPEG routes without
+ * The URL helper lets <img src> render stored screenshot JPEGs without
  * routing those payloads through the JSON client.
  */
 
 import {
+  type AuditAgentList,
   type AuditCleanupResult,
   type AuditRetention,
   type AuditStorageState,
   type Dispatch,
+  type LiveSessionActivityState,
   type SessionDetail,
   type SessionList,
   type SessionScreenshotList,
@@ -26,10 +30,7 @@ import {
   type SessionSummary,
   type SetAuditRetentionRequest,
 } from '@browseros/claw-api'
-import {
-  buildSessionPreviewUrl,
-  buildSessionScreenshotUrl,
-} from '@browseros/claw-api-client'
+import { buildSessionScreenshotUrl } from '@browseros/claw-api-client'
 import { useEffect, useState } from 'react'
 import {
   createInfiniteQuery,
@@ -49,6 +50,8 @@ export interface UseSessionsVariables {
   profileId?: string
   slug?: string
   status?: SessionStatus
+  /** Only tasks that failed or were stopped, filtered before pagination. */
+  needsAttention?: boolean
   site?: string
   search?: string
   since?: number
@@ -74,13 +77,38 @@ export const useSessions = createInfiniteQuery<
   placeholderData: (previous) => previous,
 })
 
+/** Every agent in History, for the agent filter; not limited to a loaded page. */
+export const useAuditAgents = createQuery<AuditAgentList>({
+  queryKey: ['api', 'audit', 'agents'],
+  fetcher: async () => (await apiClient()).listAuditAgents(),
+})
+
+// Polling is opt-in at the call site (see cockpit.data.ts), never a factory
+// default, so consumers that only need a one-off snapshot do not poll.
 export const useLiveSessions = createQuery<SessionList>({
   queryKey: ['api', 'sessions', 'live'],
   fetcher: async () =>
     (await apiClient()).listSessions({ status: SessionStatus.Live }),
-  refetchInterval: 1500,
-  refetchIntervalInBackground: true,
 })
+
+/** How often a live task's badge refreshes its activity when the cockpit is not polling. */
+const LIVE_STATE_POLL_MS = 5000
+
+/**
+ * Whether a live task is active or idle. Only the live-session snapshot carries activity; the
+ * history and detail responses do not, so task rows and pages read it here by session id. On
+ * Home this shares the cockpit's faster-polled query; `undefined` turns the lookup off.
+ */
+export function useLiveSessionState(
+  sessionId: string | undefined,
+): LiveSessionActivityState | undefined {
+  const live = useLiveSessions({
+    enabled: sessionId !== undefined,
+    refetchInterval: LIVE_STATE_POLL_MS,
+  })
+  return live.data?.items.find((session) => session.sessionId === sessionId)
+    ?.live?.state
+}
 
 export const useSessionDetail = createQuery<
   SessionDetail,
@@ -94,6 +122,8 @@ export const useSessionDetail = createQuery<
     query.state.data?.session.status === 'live' ? 3000 : false,
 })
 
+// No factory refetchInterval: the audit detail screen opts in only while the
+// session is live (see task-detail.data.ts) so a finished session stops polling.
 export const useSessionScreenshots = createQuery<
   SessionScreenshotList,
   { sessionId: string },
@@ -102,7 +132,6 @@ export const useSessionScreenshots = createQuery<
   queryKey: ['api', 'session', 'screenshots'],
   fetcher: async ({ sessionId }) =>
     (await apiClient()).listSessionScreenshots({ sessionId }),
-  refetchInterval: 3000,
 })
 
 /** Absolute URL for one immutable session-owned screenshot. */
@@ -112,15 +141,6 @@ export function taskScreenshotUrl(
   baseUrl = apiBaseUrl(),
 ): string {
   return buildSessionScreenshotUrl(baseUrl, { sessionId, screenshotId })
-}
-
-/** Absolute URL for a fresh live-session JPEG; `refresh` only busts browser caches. */
-export function sessionPreviewUrl(
-  sessionId: string,
-  refresh: number,
-  baseUrl = apiBaseUrl(),
-): string {
-  return buildSessionPreviewUrl(baseUrl, { sessionId, refresh })
 }
 
 /**
@@ -152,24 +172,15 @@ export function useApiBaseUrl(): string | null {
   return useResolvedApiBaseUrl()
 }
 
-export function useSessionPreviewUrl(
-  sessionId: string,
-  refresh: number,
-): string | null {
-  const baseUrl = useResolvedApiBaseUrl()
-  return baseUrl === null
-    ? null
-    : sessionPreviewUrl(sessionId, refresh, baseUrl)
-}
-
 /**
  * Audit storage usage + the active retention policy for the "Manage audit
  * files" dialog. Polled so the numbers stay fresh while the dialog is open.
  */
+// Polling is opt-in at the call site (the Manage audit files dialog) so the
+// numbers stay fresh only while that dialog is open.
 export const useAuditStorage = createQuery<AuditStorageState>({
   queryKey: ['api', 'audit', 'storage'],
   fetcher: async () => (await apiClient()).getAuditStorage(),
-  refetchInterval: 30000,
 })
 
 /** Persist the retention policy. Callers invalidate `useAuditStorage`. */

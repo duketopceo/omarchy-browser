@@ -21,7 +21,6 @@ export const LLM_PROVIDERS = {
   OLLAMA: 'ollama',
   LMSTUDIO: 'lmstudio',
   BEDROCK: 'bedrock',
-  BROWSEROS: 'browseros',
   OPENAI_COMPATIBLE: 'openai-compatible',
   MOONSHOT: 'moonshot',
   CHATGPT_PRO: 'chatgpt-pro',
@@ -41,7 +40,6 @@ export const LLMProviderSchema = z.enum([
   LLM_PROVIDERS.OLLAMA,
   LLM_PROVIDERS.LMSTUDIO,
   LLM_PROVIDERS.BEDROCK,
-  LLM_PROVIDERS.BROWSEROS,
   LLM_PROVIDERS.OPENAI_COMPATIBLE,
   LLM_PROVIDERS.MOONSHOT,
   LLM_PROVIDERS.CHATGPT_PRO,
@@ -50,6 +48,31 @@ export const LLMProviderSchema = z.enum([
 ])
 
 export type LLMProvider = z.infer<typeof LLMProviderSchema>
+
+export const CONVERSATION_ID_PLACEHOLDER = '{{conversationId}}'
+// Unlike $, the final assertion rejects trailing newlines too.
+export const HEADER_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+(?![\s\S])/
+export const HEADER_VALUE_PATTERN = /^[\t\x20-\x7e\x80-\xff]*(?![\s\S])/
+
+export const LLMHeadersSchema = z
+  .record(
+    z.string().regex(HEADER_NAME_PATTERN),
+    z.string().regex(HEADER_VALUE_PATTERN),
+  )
+  .superRefine((headers, ctx) => {
+    const names = new Set<string>()
+    for (const name of Object.keys(headers)) {
+      const normalized = name.toLowerCase()
+      if (names.has(normalized)) {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'Duplicate header name',
+          path: [name],
+        })
+      }
+      names.add(normalized)
+    }
+  })
 
 /**
  * LLM configuration schema
@@ -61,6 +84,7 @@ export const LLMConfigSchema = z.object({
   model: z.string().optional(),
   apiKey: z.string().optional(),
   baseUrl: z.string().optional(),
+  headers: LLMHeadersSchema.optional(),
   // Azure-specific
   resourceName: z.string().optional(),
   // AWS Bedrock-specific

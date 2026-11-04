@@ -5,241 +5,271 @@
  */
 
 import type { Skill } from '@browseros/claw-api'
-import { Plus } from 'lucide-react'
-import type { ReactNode } from 'react'
-import { useLocation, useNavigate } from 'react-router'
-import { DeleteSkillDialog } from '@/components/skills/DeleteSkillDialog'
+import { Bookmark, Globe, Lightbulb, Plus, TriangleAlert } from 'lucide-react'
+import { type ReactNode, useState } from 'react'
+import { NavLink } from 'react-router'
+import { CopyButton } from '@/components/copy/CopyButton'
+import { Favicon } from '@/components/favicon/Favicon'
+import { HarnessIcon } from '@/components/harness/HarnessIcon'
+import type { Harness } from '@/components/harness/harness.types'
+import { Page } from '@/components/layout/Page'
+import { PageHeader } from '@/components/layout/PageHeader'
+import { Button } from '@/components/motion/button/base'
+import { CARD_TARGET_CLASS, Card } from '@/components/motion/card'
+import { Phrase } from '@/components/skills/Phrase'
 import { RunSkillButton } from '@/components/skills/RunSkillButton'
+import { SkillActions } from '@/components/skills/SkillActions'
 import { SkillFormDialog } from '@/components/skills/SkillFormDialog'
-import { Button } from '@/components/ui/button'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
+import { UltrafastBadge } from '@/components/skills/UltrafastBadge'
+import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { useSkillsScreenData } from './skills.data'
-import { formatTokens, skillCommand } from './skills.helpers'
+import { SAVE_PHRASE, skillSites, usedLabel } from './skills.helpers'
 
-const CELL_PADDING = 'px-2 py-3 first:pl-4 last:pr-4'
+/** Two columns at the page's full width, one on narrow screens. */
+const GRID_CLASS =
+  'grid grid-cols-[repeat(auto-fill,minmax(min(360px,100%),1fr))] gap-3'
 
-/**
- * Tasks list. A task is a skill BrowserOS neo linked into the connected coding
- * agents; each row shows its run count and token savings. Row click opens
- * the SKILL.md and run history.
- */
+/** Things you ask for often, as cards that each copy the phrase that runs it again. */
 export function Skills() {
-  const { skills, isLoading, isError } = useSkillsScreenData()
-  const navigate = useNavigate()
-  const location = useLocation()
-
-  const openSkill = (name: string) =>
-    navigate(`/skills/${encodeURIComponent(name)}`, {
-      state: { from: location.pathname },
-    })
+  const { skills, agents, isLoading, isError } = useSkillsScreenData()
+  const [creating, setCreating] = useState(false)
+  const now = Date.now()
 
   return (
-    <div className="relative mx-auto flex w-full max-w-6xl flex-col gap-6 px-8 pt-8 pb-16">
-      <header className="flex items-start justify-between gap-4">
-        <div className="flex flex-col gap-1">
-          <h1 className="font-extrabold text-3xl leading-tight tracking-tight md:text-4xl">
-            Tasks
-          </h1>
-          <p className="text-ink-2 text-sm">
-            Skills BrowserOS neo linked into your coding agents. Re-run one by
-            name.
-          </p>
-        </div>
-        <SkillFormDialog
-          mode="create"
-          trigger={
-            <Button size="sm" className="rounded-9">
-              <Plus />
-              New task
-            </Button>
-          }
-        />
-      </header>
-
-      {isError ? (
-        <SkillsNotice>
-          Could not load your tasks. Check that BrowserOS neo is running and try
-          again.
-        </SkillsNotice>
-      ) : isLoading ? (
-        <SkillsSkeleton />
-      ) : skills.length === 0 ? (
-        <SkillsEmpty />
-      ) : (
-        <LedgerCard>
-          <Table className="table-fixed">
-            <TableHeader>
-              <TableRow className="border-ledger-border border-b bg-ledger-head hover:bg-ledger-head">
-                <TableHead
-                  className={cn(
-                    CELL_PADDING,
-                    'h-auto font-medium text-[12px] text-ledger-head-ink',
-                  )}
-                >
-                  Task
-                </TableHead>
-                <TableHead
-                  className={cn(
-                    CELL_PADDING,
-                    'h-auto w-24 text-right font-medium text-[12px] text-ledger-head-ink',
-                  )}
-                >
-                  Runs
-                </TableHead>
-                <TableHead
-                  className={cn(
-                    CELL_PADDING,
-                    'h-auto w-40 text-right font-medium text-[12px] text-ledger-head-ink',
-                  )}
-                >
-                  Tokens saved
-                </TableHead>
-                <TableHead
-                  className={cn(
-                    CELL_PADDING,
-                    'h-auto w-44 font-medium text-[12px] text-ledger-head-ink',
-                  )}
-                >
-                  <span className="sr-only">Actions</span>
-                </TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {skills.map((skill) => (
-                <SkillRow
-                  key={skill.name}
-                  skill={skill}
-                  onOpen={() => openSkill(skill.name)}
-                />
-              ))}
-            </TableBody>
-          </Table>
-        </LedgerCard>
-      )}
-    </div>
-  )
-}
-
-function SkillRow({ skill, onOpen }: { skill: Skill; onOpen: () => void }) {
-  return (
-    <TableRow
-      data-testid={`skill-row-${skill.name}`}
-      onClick={onOpen}
-      className="cursor-pointer border-ledger-divider border-b hover:bg-card-tint"
-    >
-      <TableCell className={cn(CELL_PADDING, 'align-middle')}>
-        <div className="flex flex-col gap-0.5">
-          <span className="font-medium font-mono text-[13px] text-primary">
-            {skillCommand(skill.name)}
-          </span>
-          <span className="truncate text-[13px] text-ledger-ink-2">
-            {skill.description}
-          </span>
-        </div>
-      </TableCell>
-      <TableCell
-        className={cn(
-          CELL_PADDING,
-          'text-right align-middle text-[13px] text-ink',
-        )}
-      >
-        {skill.runCount}
-      </TableCell>
-      <TableCell className={cn(CELL_PADDING, 'text-right align-middle')}>
-        {skill.tokenSavings && skill.tokenSavings.measuredRunCount > 0 ? (
-          <div className="flex flex-col items-end gap-0.5">
-            <span className="text-[13px] text-ink">
-              {formatTokens(Math.max(0, skill.tokenSavings.saved))}
-            </span>
-            <span className="text-[11px] text-ink-3">saved</span>
-          </div>
-        ) : (
-          <span className="text-[13px] text-ink-3">not measured</span>
-        )}
-      </TableCell>
-      <TableCell
-        className={cn(CELL_PADDING, 'align-middle')}
-        onClick={(event) => event.stopPropagation()}
-      >
-        <div className="flex items-center justify-end gap-1.5">
-          <RunSkillButton name={skill.name} />
-          <DeleteSkillDialog
-            name={skill.name}
-            onDeleted={() => {}}
-            trigger={
-              <Button
-                variant="ghost"
-                size="sm"
-                className="rounded-9 text-red hover:text-red"
-              >
-                Delete
-              </Button>
-            }
-          />
-        </div>
-      </TableCell>
-    </TableRow>
-  )
-}
-
-function LedgerCard({ children }: { children: ReactNode }) {
-  return (
-    <div className="overflow-clip rounded-9 border border-ledger-border bg-card">
-      {children}
-    </div>
-  )
-}
-
-function SkillsNotice({ children }: { children: ReactNode }) {
-  return (
-    <div className="rounded-9 border border-ledger-border bg-card px-6 py-10 text-center text-ink-2 text-sm">
-      {children}
-    </div>
-  )
-}
-
-function SkillsEmpty() {
-  return (
-    <div className="flex flex-col items-center gap-4 rounded-9 border border-ledger-border border-dashed bg-card px-6 py-16 text-center">
-      <div className="flex flex-col gap-1">
-        <p className="font-semibold text-base text-ink">No tasks yet</p>
-        <p className="mx-auto max-w-md text-ink-2 text-sm">
-          When your coding agent saves a repeatable browser task with BrowserOS
-          neo, it shows up here, linked into your agents and re-runnable by
-          name. You can also write one yourself.
-        </p>
-      </div>
-      <SkillFormDialog
-        mode="create"
-        trigger={
-          <Button size="sm" className="rounded-9">
-            <Plus />
-            New task
+    <Page className="gap-6 md:gap-6">
+      <PageHeader
+        title="Skills"
+        lede="Things you ask for often. Copy one into any of your AI agents to run it again."
+        actions={
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setCreating(true)}
+            className="font-semibold"
+          >
+            <Plus aria-hidden className="size-4" />
+            Make one by hand
           </Button>
         }
       />
+
+      <div className="flex flex-col gap-4">
+        <SaveTip />
+
+        <div className="flex flex-col gap-5">
+          {agents.length > 0 ? <WorksIn agents={agents} /> : null}
+
+          {isError ? (
+            <EmptyCard
+              tone="error"
+              icon={<TriangleAlert className="size-5" />}
+              title="Couldn’t load your skills"
+              hint="Check that BrowserOS is running, then open this page again."
+            />
+          ) : isLoading ? (
+            <CardsSkeleton />
+          ) : skills.length === 0 ? (
+            <EmptyCard
+              icon={<Bookmark className="size-5" />}
+              title="No skills yet"
+              hint="Finish a task with one of your AI agents, then ask it to save it as a skill. It shows up here."
+            />
+          ) : (
+            <ul className={GRID_CLASS}>
+              {skills.map((skill) => (
+                <li key={skill.name} className="flex">
+                  <SkillCard skill={skill} now={now} />
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+
+      <SkillFormDialog
+        mode="create"
+        open={creating}
+        onOpenChange={setCreating}
+      />
+    </Page>
+  )
+}
+
+// ---------------------------------------------------------------------------
+
+/** One quiet line, so the skills stay the first thing on the page. */
+function SaveTip() {
+  return (
+    <p className="flex flex-wrap items-center gap-x-2.5 gap-y-2 text-[14.5px] text-ink-2">
+      <span>
+        <Lightbulb
+          aria-hidden
+          className="mr-2 inline size-4 align-[-3px] text-primary"
+        />
+        To add a skill, finish a task, then tell your AI agent{' '}
+        <Phrase>{SAVE_PHRASE}</Phrase>
+      </span>
+      <CopyButton
+        text={SAVE_PHRASE}
+        what="the phrase"
+        variant="ghost"
+        size="sm"
+        className="h-[30px] px-2 font-semibold text-[13.5px] text-primary"
+      />
+    </p>
+  )
+}
+
+/**
+ * The connected agents, shown once for every skill. A skill records the
+ * agents it was linked into when it was saved, so they can differ between
+ * skills and the line makes no claim about how many.
+ */
+function WorksIn({ agents }: { agents: Harness[] }) {
+  return (
+    <div className="flex items-center gap-2.5">
+      <span role="img" aria-label={agents.join(', ')} className="flex shrink-0">
+        {agents.map((harness, index) => (
+          <span
+            key={harness}
+            className={cn(
+              'grid size-6 place-items-center rounded-full bg-card shadow-[0_0_0_1px_var(--color-border-2)]',
+              index > 0 && '-ml-2',
+            )}
+          >
+            <HarnessIcon harness={harness} className="size-3.5" />
+          </span>
+        ))}
+      </span>
+      <p className="text-[14px] text-ink-2 leading-[18px]">
+        Works in your connected agents.
+      </p>
     </div>
   )
 }
 
-function SkillsSkeleton() {
+/**
+ * The title links to the skill's page across the whole card. Copy and the
+ * menu sit above that link only because they are positioned and come after
+ * it in the DOM, with no z-index: SkillActions renders its edit dialog in
+ * place, so a stacking context around it would trap the dialog under the
+ * cards after it. That is why the card is a grid: the menu is drawn on the
+ * top row but written last. The card is not `interactive` either, since its
+ * press scale is a transform, which would re-anchor that fixed dialog to the
+ * card while pressed.
+ */
+function SkillCard({ skill, now }: { skill: Skill; now: number }) {
+  const sites = skillSites(skill.site)
+  const favicon = sites.length === 1 ? sites[0] : undefined
+  // A hand-edited SKILL.md can carry a blank description; the name keeps the card titled.
+  const title = skill.description.trim() || skill.name
   return (
-    <LedgerCard>
-      <div className="divide-y divide-ledger-divider">
-        {['s1', 's2', 's3', 's4'].map((id) => (
-          <div key={id} className="px-4 py-4">
-            <div className="h-4 w-full animate-pulse rounded bg-card-tint" />
-          </div>
-        ))}
+    <Card
+      size="compact"
+      className="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2.5 border-border-2 bg-card px-4 pt-4 pb-3.5 shadow-card hover:border-primary/35 has-[a:focus-visible]:ring-2 has-[a:focus-visible]:ring-ring"
+    >
+      <span
+        aria-hidden
+        className="col-start-1 row-start-1 grid size-7 place-items-center rounded-md bg-accent-tint text-ink-3"
+      >
+        {favicon ? (
+          <Favicon site={favicon} className="size-4 rounded-[3px]" />
+        ) : (
+          <Globe className="size-4" />
+        )}
+      </span>
+      <span className="col-start-2 row-start-1 truncate text-[13px] text-ink-3 leading-4">
+        {sites.length > 0 ? sites.join(', ') : 'Any website'}
+      </span>
+      <NavLink
+        to={`/skills/${encodeURIComponent(skill.name)}`}
+        title={title}
+        className={cn(
+          CARD_TARGET_CLASS,
+          'col-span-full row-start-2 truncate font-semibold text-[15.5px] text-cyanotype-ink leading-[21px] outline-none',
+        )}
+      >
+        {title}
+      </NavLink>
+      <div className="col-span-full row-start-3 flex items-center justify-between gap-3">
+        <span className="flex min-w-0 items-center gap-2 text-[13px] text-ink-3 leading-4">
+          <UltrafastBadge ultrafast={skill.ultrafast} />
+          <span className="truncate">
+            {usedLabel(skill.runCount, skill.lastRunAt, now)}
+          </span>
+        </span>
+        <RunSkillButton
+          name={skill.name}
+          variant="tinted"
+          className="relative h-[30px] shrink-0 px-2.5 text-[13px] [&_svg]:size-[13px]"
+        />
       </div>
-    </LedgerCard>
+      <SkillActions
+        skill={skill}
+        menuClassName="relative col-start-3 row-start-1 -my-2 -mr-2.5 justify-self-end"
+      />
+    </Card>
+  )
+}
+
+function EmptyCard({
+  icon,
+  title,
+  hint,
+  tone = 'neutral',
+}: {
+  icon: ReactNode
+  title: string
+  hint: string
+  tone?: 'neutral' | 'error'
+}) {
+  return (
+    <Card
+      size="compact"
+      className="flex-row items-center gap-4 border-border-2 bg-card px-[22px] py-5 shadow-card"
+    >
+      <span
+        aria-hidden
+        className={cn(
+          'grid size-11 shrink-0 place-items-center rounded-full',
+          tone === 'error'
+            ? 'bg-red-tint text-red-ink'
+            : 'bg-accent-tint text-primary',
+        )}
+      >
+        {icon}
+      </span>
+      <span className="flex min-w-0 flex-col gap-0.5">
+        <span className="font-bold text-[16px] text-cyanotype-ink">
+          {title}
+        </span>
+        <span className="text-[14.5px] text-ink-2">{hint}</span>
+      </span>
+    </Card>
+  )
+}
+
+function CardsSkeleton() {
+  return (
+    <div className={GRID_CLASS}>
+      {['s1', 's2', 's3', 's4'].map((id) => (
+        <Card
+          key={id}
+          size="compact"
+          className="gap-2.5 border-border-2 bg-card px-4 pt-4 pb-3.5 shadow-card"
+        >
+          <div className="flex items-center gap-2.5">
+            <Skeleton className="size-7" />
+            <Skeleton className="h-3.5 w-1/3" />
+          </div>
+          <Skeleton className="my-[3px] h-4 w-4/5" />
+          <div className="flex items-center justify-between">
+            <Skeleton className="h-3.5 w-2/5" />
+            <Skeleton className="h-[30px] w-[72px]" />
+          </div>
+        </Card>
+      ))}
+    </div>
   )
 }

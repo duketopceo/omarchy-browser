@@ -7,6 +7,9 @@ Azure BYOC runners:
 - `.github/workflows/release-windows.yml`
 - `.github/workflows/build-browseros.yml`
 
+`.github/workflows/release-docker.yml` also builds its claw-server binaries on the
+Linux x64 runner, with its own queue watchdog.
+
 The full product workflows call the Linux and Windows wrappers, which delegate
 one native lane to the reusable `build-browseros.yml` workflow. That workflow
 owns the WarpBuild checkout, cache, sync, one `bos_build` invocation, browser
@@ -117,13 +120,25 @@ Only dispatch one when you intentionally want to spend Azure compute time.
 
 ## Release lane flow
 
-`release-linux.yml` and `release-windows.yml` build one matrix entry per
-selected product (`browseros`, `browserclaw`, or `all`) and call
+`release-linux.yml` and `release-windows.yml` select products (`browseros`,
+`browserclaw`, or `all`) and call
 `.github/workflows/build-browseros.yml` with `profile=release-ci`. Full product
 releases set `resource-mode=published`, pass the frozen dispatch SHA, and build
 one product after its server and extension workflows publish their `latest`
 resources. Standalone wrapper dispatches use the same published-resource path.
 Linux is unsigned. Windows follows the caller's `sign` input.
+
+Linux also accepts `arch=x64|arm64|all` (default x64). The product-by-architecture
+matrix cross-compiles arm64 on the same x64 runner label. Its entries run in
+parallel, each on its own ephemeral VM, so `arch=all` costs one build's
+wall-clock rather than two. Both architectures merge one product/version's
+`linux/release.json`; the upload step writes it with an R2 compare-and-swap
+(`If-Match`/`If-None-Match`), re-reading and re-merging on a 412, so concurrent
+lanes cannot drop each other's keys. Two parallel lanes need 64 vCPUs of
+Dalsv7-family quota in East US. Published resources support both targets;
+source mode is limited to x64. A dual-architecture standalone build requires one
+product and exact `server_version`, `extension_version`, and `onboarding_version`
+inputs; full product releases supply those pins. See [Linux arm64](linux-arm64.md).
 
 The reusable workflow performs the per-platform recipe:
 
@@ -136,18 +151,15 @@ The reusable workflow performs the per-platform recipe:
    skip the step.
 3. `astral-sh/setup-uv`, resolve the Chromium pin and paths, then restore the
    pinned chromium checkout from cache (see below).
-4. `browseros source ensure --step checkout --repair-cached-depot-tools` —
-   validates depot_tools, normalizes only line-ending-only tracked changes in
-   the explicitly disposable checkout, and ensures `src` at the tag from
-   `packages/browseros/CHROMIUM_VERSION`. No-op when the cache is warm, clean,
-   and the pin is unchanged. Substantive tracked depot_tools changes fail
-   closed rather than being reset.
-5. `uv run browseros build --modules clean ...` — the standard clean module
-   resets the tree (it also deletes hook-managed toolchains like
-   `third_party/llvm-build`, which the next step restores).
-6. `browseros source ensure --step sync --repair-cached-depot-tools` —
-   revalidates depot_tools, then runs `gclient sync -D --no-history
-   --shallow`, exactly what the git_setup module runs.
+4. `browseros source ensure --reset --repair-cached-depot-tools` —
+   fetches only the missing exact tag, resets source and gclient-managed Git
+   repositories, and syncs dependencies/hooks after destructive cleanup.
+   Existing `.gclient` settings and full history are preserved. Only line-ending
+   drift in cached depot_tools is repaired; substantive changes fail closed.
+5. `browseros source clean-outputs --all-products ...` — removes known product
+   output/checkpoint state and prunes retired resource families in the selected
+   BrowserOS repository. This does not delete hook-managed toolchains.
+6. Preparation failure stops before cache publication or product patching.
 7. Save the cache (only when the restore missed, i.e. first run per pin).
 8. In source mode, download and validate the prepared common-resource artifact.
    Set up Bun for the BrowserOS server or the native Rust target for the
@@ -223,8 +235,6 @@ acceleration on WarpCache for Linux and the R2 tarball for Windows; do not add
 - **Compiler cache (sccache/ccache via `cc_wrapper`)** in a CI gn flags
   variant: release rebuilds often differ only slightly, so this is the lever
   that could cut warm builds to well under an hour.
-- **Linux arm64** via `architecture: [x64, arm64]` in the CI config once
-  the x64 lane is green (sysroot bootstrap already handled by the modules).
 
 ## Operating release lanes
 
@@ -347,10 +357,11 @@ Mechanics worth knowing:
 - GitHub discards self-hosted jobs queued for more than 24h, and each release
   platform workflow has a concurrency group (`release-linux` or
   `release-windows`) with `cancel-in-progress: false`. A queued build can
-  therefore pin the platform lane for a full day. The `queue-watchdog` job
-  steps in at the 20-minute mark: it cancels the run when no build job is
-  actually running (everything stuck in queue or already finished), and fails
-  loudly without cancelling while any build is in progress. In that mixed
+  therefore pin the platform lane for a full day. Both lanes'
+  `queue-watchdog` steps in at the 20-minute mark if any build job is still
+  queued: it cancels the run when no build job is actually running
+  (everything stuck in queue or already finished), and fails loudly without
+  cancelling while any build is in progress. In that mixed
   case, cancel the run manually once the live builds finish — a still-queued
   job otherwise pins the group for up to 24h with no watcher left.
 - Do not rely on a configuration fix to repair the current release.
