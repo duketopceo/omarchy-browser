@@ -3,8 +3,15 @@
  * Copyright 2025 BrowserOS
  * SPDX-License-Identifier: AGPL-3.0-or-later
  *
- * Pure formatters for the Tasks list and detail. No React, no side effects.
+ * Pure formatters for the Skills list and page. No React, no side effects.
  */
+
+import type { Skill, SkillRun, SkillUltrafast } from '@browseros/claw-api'
+import { HARNESSES, type Harness } from '@/components/harness/harness.types'
+import type { AnimatedBadgeStatus } from '@/components/motion/animated-badge'
+import { verbForTool } from '@/lib/step-sentences'
+import type { ReplayVerb } from '@/modules/api/replay.hooks'
+import { siteHost } from '@/modules/favicon/favicon.helpers'
 
 /** Every skill is namespaced under this prefix so it never collides with a
  *  user's own agent skills and the whole set autocompletes on `/neo`. */
@@ -18,31 +25,13 @@ export function neoName(suffix: string): string {
   return `${NEO_SKILL_PREFIX}${suffix.replace(/^neo-/, '')}`
 }
 
-/** The command a user pastes into a coding agent to run a skill. */
-export function skillCommand(name: string): string {
-  return `/${name}`
-}
-
-/** Compact token count, e.g. 14600 -> "14.6k". */
-export function formatTokens(tokens: number): string {
-  if (tokens < 1000) {
-    return String(tokens)
-  }
-  return `${(tokens / 1000).toFixed(1)}k`
-}
-
 /**
- * Percent change from the first run's tokens to the latest run's, so a negative
- * value means the skill got cheaper. `null` when there is nothing to compare.
+ * The phrase a person pastes into an AI agent to run a skill. Plain words
+ * rather than a prefix, since each agent has its own (`/name` in Claude Code,
+ * `$name` in Codex) and every one understands being asked by name.
  */
-export function tokenDeltaPercent(
-  first: number | undefined,
-  latest: number | undefined,
-): number | null {
-  if (first === undefined || latest === undefined || first === 0) {
-    return null
-  }
-  return Math.round(((latest - first) / first) * 100)
+export function skillCommand(name: string): string {
+  return `use the ${name} skill`
 }
 
 /**
@@ -86,21 +75,174 @@ export function parseSkillBody(body: string): {
   return { steps, learnedNotes }
 }
 
-/** A short "time ago" label from an epoch-ms timestamp. */
-export function formatRelativeTime(
-  epochMs: number,
-  now: number = Date.now(),
+/** What a person tells their AI agent, after a task, to save it here. */
+export const SAVE_PHRASE = 'save this as a skill in neo'
+
+const DAY_MS = 24 * 60 * 60 * 1000
+
+function startOfDay(ms: number): number {
+  const day = new Date(ms)
+  day.setHours(0, 0, 0, 0)
+  return day.getTime()
+}
+
+/** "today", "yesterday", then "Oct 21" in the reader's locale. */
+export function lastUsedLabel(epochMs: number, now: number): string {
+  const days = Math.round((startOfDay(now) - startOfDay(epochMs)) / DAY_MS)
+  if (days <= 0) return 'today'
+  if (days === 1) return 'yesterday'
+  return new Date(epochMs).toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+  })
+}
+
+/** "Used 4 times · last used yesterday", or "Not used yet". */
+export function usedLabel(
+  runCount: number,
+  lastRunAt: number | undefined,
+  now: number,
 ): string {
-  const minutes = Math.floor(Math.max(0, now - epochMs) / 60_000)
-  if (minutes < 1) {
-    return 'just now'
+  if (runCount <= 0) return 'Not used yet'
+  const times = runCount === 1 ? 'Used once' : `Used ${runCount} times`
+  return lastRunAt === undefined
+    ? times
+    : `${times} · last used ${lastUsedLabel(lastRunAt, now)}`
+}
+
+/**
+ * The sites a skill works on, by host ("trmnl.com" for "https://trmnl.com").
+ * A skill stores one free-text site, which a person or an agent may have
+ * written as a full address or as a comma list ("x.com, reddit.com").
+ */
+export function skillSites(site: string | undefined): string[] {
+  return (site ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => siteHost(entry)?.replace(/^www\./, '') ?? entry)
+}
+
+/**
+ * The connected agents any skill is linked into, once, in the usual harness
+ * order. A skill records its links when it is saved and keeps them after an
+ * agent is disconnected, so the saved links alone can name agents that are gone.
+ */
+export function worksInAgents(
+  skills: Pick<Skill, 'linkedAgents'>[],
+  connected: readonly Harness[],
+): Harness[] {
+  return HARNESSES.filter(
+    (harness) =>
+      connected.includes(harness) &&
+      skills.some((skill) => skill.linkedAgents.includes(harness)),
+  )
+}
+
+const STUCK_WHILE: Record<ReplayVerb, string> = {
+  navigate: 'opening a page',
+  read: 'reading a page',
+  click: 'clicking on a page',
+  type: 'typing on a page',
+  attach: 'handling a file',
+  submit: 'sending a form',
+  done: 'finishing up',
+}
+
+/** Where a run that did not finish got stuck, in plain words. */
+export function stuckWhile(erroredTool: string | undefined): string {
+  return erroredTool
+    ? `Got stuck while ${STUCK_WHILE[verbForTool(erroredTool)]}.`
+    : 'Got stuck before it finished.'
+}
+
+export interface UltrafastBadgeMeta {
+  label: string
+  tone: AnimatedBadgeStatus
+}
+
+/** How a skill's ultrafast state reads on a badge, or nothing for a plain skill. */
+export function ultrafastBadge(
+  ultrafast: SkillUltrafast | undefined,
+): UltrafastBadgeMeta | null {
+  switch (ultrafast?.status) {
+    case 'verified':
+      return { label: 'Ultrafast', tone: 'success' }
+    case 'degraded':
+      return { label: 'Ultrafast · needs a repair', tone: 'warning' }
+    case 'broken':
+      return { label: 'Ultrafast paused', tone: 'danger' }
+    case 'pending':
+      return { label: 'Becoming ultrafast', tone: 'info' }
+    case 'off':
+      return { label: 'Runs the normal way', tone: 'neutral' }
+    default:
+      return null
   }
-  if (minutes < 60) {
-    return `${minutes}m ago`
+}
+
+/** "about 1.2 s a run" from a median in milliseconds. */
+export function runSpeed(p50Ms: number): string {
+  const seconds = Math.max(0.1, Math.round(p50Ms / 100) / 10)
+  return `about ${seconds} s a run`
+}
+
+/** "Checked today · repaired yesterday · about 1.2 s a run". */
+export function healthLine(ultrafast: SkillUltrafast, now: number): string {
+  const parts: string[] = []
+  if (ultrafast.verifiedAt !== undefined) {
+    parts.push(`Checked ${lastUsedLabel(ultrafast.verifiedAt, now)}`)
   }
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) {
-    return `${hours}h ago`
+  if (ultrafast.repairedAt !== undefined) {
+    parts.push(`repaired ${lastUsedLabel(ultrafast.repairedAt, now)}`)
   }
-  return `${Math.floor(hours / 24)}d ago`
+  if (ultrafast.p50Ms !== undefined) parts.push(runSpeed(ultrafast.p50Ms))
+  return parts.join(' · ')
+}
+
+const HANDOVER_CAUSE: Record<string, string> = {
+  site_changed: 'the site changed',
+  input_only: 'this input did not match',
+  transient: 'the page was slow or asked for a check',
+}
+
+/** How a run was carried out, or nothing for a run done the normal way. */
+export function runModeLabel(
+  run: Pick<SkillRun, 'mode' | 'handoverStep' | 'handoverCause'>,
+): string | null {
+  if (run.mode === 'ultrafast') return 'Ultrafast'
+  if (run.mode !== 'handed_back') return null
+  const step = run.handoverStep ? ` at step ${run.handoverStep}` : ''
+  const cause = run.handoverCause
+    ? HANDOVER_CAUSE[run.handoverCause]
+    : undefined
+  return `Took over${step}${cause ? `: ${cause}` : ''}`
+}
+
+/** How many runs went each way, for the skill page. */
+export function runModeCounts(runs: Pick<SkillRun, 'mode'>[]): {
+  ultrafast: number
+  handedBack: number
+  normal: number
+} {
+  return runs.reduce(
+    (counts, run) => {
+      if (run.mode === 'ultrafast') counts.ultrafast += 1
+      else if (run.mode === 'handed_back') counts.handedBack += 1
+      else counts.normal += 1
+      return counts
+    },
+    { ultrafast: 0, handedBack: 0, normal: 0 },
+  )
+}
+
+/** Whether the skill page should offer the one-time write approval. */
+export function needsWriteApproval(
+  ultrafast: SkillUltrafast | undefined,
+): boolean {
+  return (
+    ultrafast?.effects === 'write' &&
+    !ultrafast.writeApproved &&
+    (ultrafast.status === 'verified' || ultrafast.status === 'degraded')
+  )
 }

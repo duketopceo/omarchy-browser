@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { UIMessage } from 'ai'
 import { hc } from 'hono/client'
 import { removeConversationExecutionHistory } from '@/lib/execution-history/storage'
-import { resolveAgentServerUrlWithRetry } from '@/modules/browseros/agent-server-url.helpers'
+import { resolveAgentServerUrl } from '@/modules/browseros/agent-server-url.helpers'
 import { useAgentServerUrl } from '@/modules/browseros/agent-server-url.hooks'
 
 export const SERVER_CONVERSATIONS_QUERY_KEY = 'server-conversations'
@@ -14,8 +14,15 @@ export interface ServerConversationSummary {
   lastUserMessage: string
 }
 
+export interface ServerConversation {
+  id: string
+  messages: UIMessage[]
+  targetType: 'browseros' | 'claude' | 'codex' | 'custom'
+  agentId?: string
+}
+
 async function conversationsClient() {
-  const baseUrl = await resolveAgentServerUrlWithRetry()
+  const baseUrl = await resolveAgentServerUrl()
   return hc<ConversationRoutes>(`${baseUrl}/conversations`)
 }
 
@@ -37,7 +44,7 @@ export async function fetchServerConversations(): Promise<
 
 export async function fetchServerConversation(
   conversationId: string,
-): Promise<{ id: string; messages: UIMessage[] } | null> {
+): Promise<ServerConversation | null> {
   const client = await conversationsClient()
   const response = await client[':conversationId'].$get({
     param: { conversationId },
@@ -55,7 +62,12 @@ export async function fetchServerConversation(
   // shape is UIMessage[] exactly as the server stored it, so assert it here at
   // the JSON boundary.
   const messages = data.conversation.messages as UIMessage[]
-  return { id: data.conversation.id, messages }
+  return {
+    id: data.conversation.id,
+    messages,
+    targetType: data.conversation.targetType,
+    agentId: data.conversation.agentId,
+  }
 }
 
 /** Deletes only the server row (tolerating 404); leaves execution history. */
@@ -78,12 +90,18 @@ export async function deleteServerConversation(
   await removeConversationExecutionHistory(conversationId)
 }
 
-export function useServerConversations(enabled = true) {
+export function useServerConversations(
+  enabled = true,
+  refetchInterval?: number,
+) {
   const { baseUrl, isLoading } = useAgentServerUrl()
   return useQuery({
     queryKey: [SERVER_CONVERSATIONS_QUERY_KEY, baseUrl],
     queryFn: fetchServerConversations,
-    enabled: Boolean(baseUrl) && !isLoading && enabled,
+    // Even if discovery failed, let the query report/retry that failure instead
+    // of leaving history in a permanently disabled "pending" state.
+    enabled: !isLoading && enabled,
+    refetchInterval,
   })
 }
 

@@ -1,24 +1,41 @@
+use crate::format::diff::DiffDetail;
 use crate::framework::{
-    ToolCtx, ToolExecResult, ToolResult, error_result, parse_args, pending_dialog_result,
-    text_result,
+    AuditHints, ToolCtx, ToolExecResult, ToolResult, error_result, parse_args,
+    pending_dialog_result, pending_file_chooser_result, text_result,
 };
+use crate::response::FieldTarget;
 use browseros_core::{
     PageId, Ref,
     input::{ClickOptions, Point, PublicMouseButton as MouseButton, ScrollDirection},
+    snapshot::RefMap,
 };
 use futures_util::future::BoxFuture;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::time::Duration;
 
 const DESCRIPTION: &str = "\
 Act on the page using refs from the last snapshot. \
+Click scrolls, briefly waits, and finds an uncovered point before sending native input. \
+If native preparation fails before a press is sent, a single left click uses DOM fallback once: it presses the element itself, \
+through banners, overlays and open dialogs. Disabled, invisible and detached targets are refused. \
+DOM fallback is reported, with inert=true when the target was behind a dialog: verify application state. \
+If neither path can dispatch, handle the blocker ref/reason and retry. An unknown click outcome must not be automatically retried. \
 kinds: click, type (into focused element), fill (ref+value, or many via fields[]), \
 press (key/combo), hover, focus, check, uncheck, select (option value), scroll, drag. \
 dialog_accept/dialog_dismiss handle pending JavaScript dialogs. \
 ALWAYS fill a whole form in one call via fields[], never field-by-field. \
+Fill types each value, replacing the field's text by default (clear=false appends), and \
+reads every filled field back as the snapshot shows it, even when diff is \"none\". \
+A page may reformat a value (\"440 212\") or reject it; compare what the field shows \
+with what you meant before submitting. \
+Use type/press for keyboard handlers and wait for application-specific readiness. \
 Reads back a post-settle diff - no follow-up diff/snapshot needed; \
-re-snapshot only for fresh refs.";
+re-snapshot only for fresh refs. \
+Control that readback with diff: \"full\" (default) whole diff, \"summary\" change counts, \
+\"none\" skip it, or a number to cap the inline diff to that many characters; \
+use \"none\"/\"summary\"/a small number on large pages where a full diff floods context.";
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -95,6 +112,34 @@ struct FillField {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum ActDiffMode {
+    None,
+    Summary,
+    Full,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(untagged)]
+enum ActDiff {
+    Mode(ActDiffMode),
+    MaxChars(f64),
+}
+
+/// Maps the act `diff` arg to a diff detail, or `None` to skip the readback
+/// entirely (the "none" mode). Absent or "full" keeps the whole diff (#2700).
+fn resolve_diff_detail(diff: Option<ActDiff>) -> Option<DiffDetail> {
+    match diff {
+        None | Some(ActDiff::Mode(ActDiffMode::Full)) => Some(DiffDetail::Full),
+        Some(ActDiff::Mode(ActDiffMode::None)) => None,
+        Some(ActDiff::Mode(ActDiffMode::Summary)) => Some(DiffDetail::Summary),
+        Some(ActDiff::MaxChars(max_chars)) => {
+            Some(DiffDetail::MaxChars(max_chars.max(0.0).floor() as usize))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ActArgs {
     page: u32,
@@ -103,7 +148,8 @@ struct ActArgs {
     r#ref: Option<String>,
     /// Text for kind=type.
     text: Option<String>,
-    /// Value for kind=fill/select.
+    /// Value for kind=fill/select. Date, time, color and range inputs take their own format,
+    /// such as 2026-10-29, 14:30 or #ff8800.
     value: Option<String>,
     /// Multiple fields for kind=fill, filled in order.
     fields: Option<Vec<FillField>>,
@@ -134,7 +180,24 @@ struct ActArgs {
     button: Option<ActMouseButton>,
     #[serde(rename = "clickCount")]
     click_count: Option<i64>,
+    /// Defaults to true for fill (replace; false appends), false for type_at.
     clear: Option<bool>,
+    /// Post-action diff detail: "full" (default) whole diff, "summary" change counts, "none" to skip it, or a number to cap the inline diff to that many characters. Use "none"/"summary"/a small number on large pages where a full diff floods context.
+    diff: Option<ActDiff>,
+    /// Treat the entered value as a secret: keep it out of the local audit log
+    /// (stored as "[redacted]") and skip its screenshot. Password and payment-card
+    /// fields are detected automatically; set this for values neo cannot classify,
+    /// such as custom widgets, canvas inputs, or a field inside a cross-origin
+    /// iframe (for example a hosted card form) typed via type/type_at.
+    sensitive: Option<bool>,
+}
+
+/// Audit redaction survives a dialog race even when a partially entered field
+/// interrupts the action before it returns.
+#[derive(Default)]
+struct ActSensitivity {
+    refs: Vec<String>,
+    redact_all: bool,
 }
 
 pub fn definition() -> crate::framework::ToolDef {
@@ -154,16 +217,111 @@ fn handler<'a>(
         {
             return Ok(Some(result));
         }
-        let console_start = ctx.session.page_signals.console_mark(&page_id);
-        let input = ctx.session.input(page_id.clone()).await;
-        if let Some(err) = run_kind(&args, &input).await? {
-            return Ok(Some(err));
+        let console_start = ctx.browser.signals().console_mark(&page_id);
+        // Marked before the input goes out: a link click's navigation event can arrive before
+        // the input's own reply does.
+        let document_start = ctx.browser.signals().document_mark(&page_id);
+        let input = ctx.browser.input(page_id.clone()).await?;
+        let mut sensitivity = ActSensitivity::default();
+        // Honor an explicit sensitive flag before the action runs: a value must
+        // still be redacted if the action later errors out (for example a stale ref
+        // on a sibling field) after this field was already filled.
+        if args.sensitive.unwrap_or(false) {
+            sensitivity.redact_all = true;
         }
-        if args.kind.is_dialog() {
-            ctx.session.page_signals.clear_dialog(&page_id);
+        let outcome: ToolExecResult<Option<ToolResult>> = if args.kind.is_dialog() {
+            let result = run_kind(&args, &input, &mut sensitivity).await;
+            if matches!(result, Ok(None)) {
+                ctx.browser.signals().clear_dialog(&page_id);
+            }
+            result
+        } else {
+            // A confirm/prompt/beforeunload opened by this action freezes the
+            // renderer, so the action's CDP ack never returns; race it against the
+            // page's dialog signal and hand control back with the pending dialog so
+            // the caller can accept or dismiss it, instead of hanging to the run cap
+            // (#2780).
+            let signals = ctx.browser.signals().clone();
+            let watched = page_id.clone();
+            let dialog = async move {
+                while signals.pending_dialog(&watched).is_none() {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            };
+            tokio::select! {
+                biased;
+                result = run_kind(&args, &input, &mut sensitivity) => result,
+                () = dialog => {
+                    Ok(Some(pending_dialog_result(ctx, page_id.clone()).unwrap_or_else(
+                        || {
+                            text_result(
+                                "a JavaScript dialog is open on this page; use act kind=\"dialog_accept\" or \"dialog_dismiss\" before other actions".to_string(),
+                                None,
+                            )
+                        },
+                    )))
+                }
+            }
+        };
+        // Attach redaction hints before propagating any error or early return, so a
+        // secret entered into the page before a failure is still kept out of the
+        // ledger and its screenshot is skipped.
+        if sensitivity.redact_all || !sensitivity.refs.is_empty() {
+            response.set_audit_hints(AuditHints {
+                sensitive_refs: std::mem::take(&mut sensitivity.refs),
+                redact_all_values: sensitivity.redact_all,
+                skip_screenshot: true,
+            });
+        }
+        // The core records its handoff before awaiting the browser. Attach this
+        // before all early returns, including dialogs, choosers and failed acks.
+        if let Some((delivery, notice)) =
+            super::click_feedback::fallback_feedback(input.dom_fallback_status())
+        {
+            response.click_data(delivery);
+            response.text(notice);
+        }
+        let filled = field_targets(ctx, &page_id, filled_refs(&args)).await;
+        match outcome {
+            Ok(Some(early)) => return Ok(Some(early)),
+            Ok(None) => {}
+            Err(err) => {
+                // A fill that stopped partway has typed into the fields before it; show them
+                // so the caller knows what the page holds before trying again.
+                if !filled.is_empty() {
+                    response.include_fields(args.page, filled, document_start);
+                }
+                return Err(err);
+            }
+        }
+        // Typing emits native keys and fill clicks to focus; both can open a picker just
+        // like an explicit click. Hover/focus/scroll/semantic selection create no activation.
+        let activates = matches!(
+            args.kind,
+            ActKind::Click
+                | ActKind::ClickAt
+                | ActKind::Press
+                | ActKind::Type
+                | ActKind::TypeAt
+                | ActKind::Fill
+                | ActKind::Check
+                | ActKind::Uncheck
+                | ActKind::Drag
+                | ActKind::DragAt
+        );
+        if let Some(chooser) = pending_file_chooser_result(ctx, page_id.clone(), activates).await? {
+            return Ok(Some(chooser));
         }
         response.data(json!({ "kind": args.kind.as_str() }));
-        response.include_diff(args.page, true);
+        if matches!(args.kind, ActKind::Click) && input.dom_fallback_status().is_none() {
+            response.click_data(json!({ "status": "dispatched", "domFallback": false }));
+        }
+        if let Some(detail) = resolve_diff_detail(args.diff) {
+            response.include_diff(args.page, true, detail, document_start);
+        }
+        if !filled.is_empty() {
+            response.include_fields(args.page, filled, document_start);
+        }
         response.include_console_summary(args.page, console_start);
         Ok(Some(text_result(
             format!("ok ({})", args.kind.as_str()),
@@ -172,9 +330,47 @@ fn handler<'a>(
     })
 }
 
+/// Each filled ref with the DOM node it names now: the fill resolved it, recovering a node the
+/// page replaced since the snapshot. The readback finds each field by that node.
+async fn field_targets(ctx: &ToolCtx, page_id: &PageId, refs: Vec<Ref>) -> Vec<FieldTarget> {
+    if refs.is_empty() {
+        return Vec::new();
+    }
+    let known = match ctx.browser.observe(page_id.clone()).await {
+        Ok(observer) => observer.last_refs().await,
+        Err(_) => RefMap::new(),
+    };
+    refs.into_iter()
+        .map(|ref_id| {
+            let entry = known.get(&ref_id);
+            FieldTarget {
+                node: entry.map(|entry| entry.backend_node_id),
+                frame: entry.and_then(|entry| entry.frame_id.clone()),
+                ref_id,
+            }
+        })
+        .collect()
+}
+
+/// The fields a fill targets, in order, for the readback after it.
+fn filled_refs(args: &ActArgs) -> Vec<Ref> {
+    if !matches!(args.kind, ActKind::Fill) {
+        return Vec::new();
+    }
+    match (&args.fields, &args.r#ref) {
+        (Some(fields), _) => fields
+            .iter()
+            .map(|field| Ref(field.r#ref.clone()))
+            .collect(),
+        (None, Some(ref_id)) => vec![Ref(ref_id.clone())],
+        (None, None) => Vec::new(),
+    }
+}
+
 async fn run_kind(
     args: &ActArgs,
     input: &browseros_core::input::Input,
+    sensitivity: &mut ActSensitivity,
 ) -> ToolExecResult<Option<ToolResult>> {
     match args.kind {
         ActKind::Click => {
@@ -197,6 +393,11 @@ async fn run_kind(
             let Some(text) = args.text.as_deref() else {
                 return Ok(Some(error_result("act type: text is required.")));
             };
+            // Classify the focused target before typing, so a secret is caught even
+            // if the keystrokes navigate or detach the field.
+            if input.focused_field_is_sensitive().await {
+                sensitivity.redact_all = true;
+            }
             input.type_text(text).await?;
         }
         ActKind::TypeAt => {
@@ -206,6 +407,9 @@ async fn run_kind(
             let Some(text) = args.text.as_deref() else {
                 return Ok(Some(error_result("act type_at: text is required.")));
             };
+            if input.point_field_is_sensitive(point.x, point.y).await {
+                sensitivity.redact_all = true;
+            }
             input
                 .type_at(point.x, point.y, text, args.clear.unwrap_or(false))
                 .await?;
@@ -213,19 +417,28 @@ async fn run_kind(
         ActKind::Fill => {
             if let Some(fields) = &args.fields {
                 for field in fields {
+                    if input
+                        .ref_field_is_sensitive(&Ref(field.r#ref.clone()))
+                        .await
+                    {
+                        sensitivity.refs.push(field.r#ref.clone());
+                    }
                     input
                         .fill(
                             &Ref(field.r#ref.clone()),
                             &field.value,
-                            args.clear.unwrap_or(false),
+                            args.clear.unwrap_or(true),
                         )
                         .await?;
                 }
             } else if let (Some(ref_id), Some(value)) =
                 (args.r#ref.as_deref(), args.value.as_deref())
             {
+                if input.ref_field_is_sensitive(&Ref(ref_id.to_string())).await {
+                    sensitivity.refs.push(ref_id.to_string());
+                }
                 input
-                    .fill(&Ref(ref_id.to_string()), value, args.clear.unwrap_or(false))
+                    .fill(&Ref(ref_id.to_string()), value, args.clear.unwrap_or(true))
                     .await?;
             } else {
                 return Ok(Some(error_result(
@@ -335,6 +548,7 @@ fn click_options(args: &ActArgs) -> ClickOptions {
             ActMouseButton::Right => MouseButton::Right,
         }),
         click_count: args.click_count,
+        ..Default::default()
     }
 }
 
@@ -351,5 +565,48 @@ fn scroll_direction(direction: Option<&ActDirection>) -> ScrollDirection {
         ActDirection::Down => ScrollDirection::Down,
         ActDirection::Left => ScrollDirection::Left,
         ActDirection::Right => ScrollDirection::Right,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn diff_detail_mapping() {
+        // Absent or "full" keeps the whole diff; "none" skips the readback.
+        assert!(matches!(resolve_diff_detail(None), Some(DiffDetail::Full)));
+        assert!(matches!(
+            resolve_diff_detail(Some(ActDiff::Mode(ActDiffMode::Full))),
+            Some(DiffDetail::Full)
+        ));
+        assert!(resolve_diff_detail(Some(ActDiff::Mode(ActDiffMode::None))).is_none());
+        assert!(matches!(
+            resolve_diff_detail(Some(ActDiff::Mode(ActDiffMode::Summary))),
+            Some(DiffDetail::Summary)
+        ));
+        // A number caps the inline diff, floored to whole characters.
+        assert!(matches!(
+            resolve_diff_detail(Some(ActDiff::MaxChars(250.7))),
+            Some(DiffDetail::MaxChars(250))
+        ));
+    }
+
+    #[test]
+    fn diff_arg_accepts_modes_and_numbers() {
+        let string_mode: ActArgs = serde_json::from_value(
+            json!({ "page": 1, "kind": "focus", "ref": "e1", "diff": "none" }),
+        )
+        .unwrap_or_else(|err| panic!("string diff arg should parse: {err}"));
+        assert!(matches!(
+            string_mode.diff,
+            Some(ActDiff::Mode(ActDiffMode::None))
+        ));
+
+        let numeric: ActArgs =
+            serde_json::from_value(json!({ "page": 1, "kind": "focus", "ref": "e1", "diff": 500 }))
+                .unwrap_or_else(|err| panic!("numeric diff arg should parse: {err}"));
+        assert!(matches!(numeric.diff, Some(ActDiff::MaxChars(_))));
     }
 }

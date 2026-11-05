@@ -1,10 +1,11 @@
 import type {
+  HelpRequest,
   LiveSessionActivityState,
   SessionBrowserTab,
   SessionSummary,
   ToolEvent,
 } from '@browseros/claw-api'
-import { HARNESSES, type Harness } from '@/components/harness/harness.types'
+import { agentIdentity } from '@/components/harness/harness.types'
 
 // Missing parent colors fall back to a stable slug hash so card identity does
 // not flicker between live-session polls.
@@ -19,7 +20,6 @@ const PALETTE = [
   '#DB2777',
 ]
 
-const TRAIL_DISPLAY_CAP = 4
 const MERGED_TRAIL_CAP = 8
 
 export function colorForSlug(slug: string): string {
@@ -50,33 +50,16 @@ export function formatRelative(ms: number, now: number): string {
   return `${days}d ago`
 }
 
-/** Returns the most recent N tool names joined for compact card trail rows. */
-export function formatToolTrail(
-  recentTools: ToolEvent[],
-  max: number = TRAIL_DISPLAY_CAP,
-): string {
-  if (recentTools.length === 0) return ''
-  return recentTools
-    .slice(-max)
-    .map((tool) => tool.name)
-    .join(' -> ')
-}
-
-/** Coerces contract strings into the UI harness union with an honest fallback. */
-export function harnessForRow(value: string | undefined): Harness {
-  if (!value) return 'Claude Code'
-  return (HARNESSES as readonly string[]).includes(value)
-    ? (value as Harness)
-    : 'Claude Code'
-}
-
 export interface LiveSessionCardRecord {
   sessionId: string
   profileId?: string
   slug: string
   label: string
   name: string
-  harness: Harness
+  /** The connected agent's harness name, such as "Claude Code", when known. */
+  harness?: string
+  /** The agent's name for sentences, such as "Claude" or "Codex". */
+  agentName: string
   color: string
   startedAt: number
   state: LiveSessionActivityState
@@ -84,6 +67,8 @@ export interface LiveSessionCardRecord {
   browserTabs: SessionBrowserTab[]
   toolCount: number
   recentTools: ToolEvent[]
+  /** Present only while the agent is parked waiting for a human on this session. */
+  helpRequest?: HelpRequest
 }
 
 export interface LiveSessionCardOptions {
@@ -139,7 +124,9 @@ export function sessionsToLiveCards(
       slug: session.slug,
       label: session.label || session.slug,
       name: session.name,
-      harness: harnessForRow(session.harness),
+      harness: session.harness,
+      agentName: agentIdentity(session.harness, session.label || session.slug)
+        .name,
       color: session.color ?? colorForSlug(session.slug),
       startedAt: session.startedAt,
       state: session.live?.state ?? 'idle',
@@ -147,6 +134,7 @@ export function sessionsToLiveCards(
       browserTabs,
       toolCount: browserTabs.reduce((sum, tab) => sum + tab.toolCount, 0),
       recentTools,
+      helpRequest: session.live?.helpRequest,
     }
   })
 
@@ -155,4 +143,73 @@ export function sessionsToLiveCards(
       left.startedAt - right.startedAt ||
       left.sessionId.localeCompare(right.sessionId),
   )
+}
+
+export type PartOfDay = 'morning' | 'afternoon' | 'evening'
+
+/** Morning from 5:00 to 11:59, afternoon to 16:59, evening otherwise. */
+export function partOfDay(hour: number): PartOfDay {
+  if (hour >= 5 && hour < 12) return 'morning'
+  if (hour >= 12 && hour < 17) return 'afternoon'
+  return 'evening'
+}
+
+export interface TimeSaved {
+  amount: number
+  unit: 'hour' | 'minute'
+}
+
+const MINUTE_MS = 60_000
+const HOUR_MS = 60 * MINUTE_MS
+
+/** Rounds measured time saved to whole hours, or minutes under an hour; null under a minute. */
+export function roundTimeSaved(ms: number): TimeSaved | null {
+  if (ms >= HOUR_MS) return { amount: Math.round(ms / HOUR_MS), unit: 'hour' }
+  const minutes = Math.round(ms / MINUTE_MS)
+  return minutes >= 1 ? { amount: minutes, unit: 'minute' } : null
+}
+
+/** The line under the greeting: what the agents are doing in one sentence. */
+export function homeLede(
+  sessions: LiveSessionCardRecord[],
+  inControl: LiveSessionCardRecord | null,
+): string {
+  if (inControl) return `You’re helping ${inControl.agentName} with one task.`
+  const waiting = sessions.filter((session) => session.helpRequest)
+  if (waiting.length === 1) {
+    return `${waiting[0]?.agentName} needs your help with one task.`
+  }
+  if (waiting.length > 1) return `${waiting.length} tasks need your help.`
+  if (sessions.length === 1) return 'Your AI agents are working on one task.'
+  if (sessions.length > 1) {
+    return `Your AI agents are working on ${sessions.length} tasks.`
+  }
+  return 'Your AI agents are ready for their next task.'
+}
+
+/** The site a help request is about, in the words a person would use. */
+export function helpRequestSite(help: HelpRequest): string {
+  if (help.url) return siteOf(help.url)
+  return help.title || 'this'
+}
+
+/** "Claude Code needs you to sign in to linkedin.com", from the request's kind. */
+export function helpRequestTitle(app: string, help: HelpRequest): string {
+  const site = help.url ? siteOf(help.url) : help.title || 'a page'
+  switch (help.kind) {
+    case 'login':
+      return `${app} needs you to sign in to ${site}`
+    case 'captcha':
+      return `${app} needs you to prove you’re not a robot on ${site}`
+    case 'approval':
+      return `${app} wants your OK on ${site}`
+    default:
+      return `${app} needs a hand on ${site}`
+  }
+}
+
+/** "Waiting 3 min", or "Just asked" in the first minute. */
+export function waitingLabel(requestedAt: number, now: number): string {
+  const minutes = Math.floor(Math.max(0, now - requestedAt) / MINUTE_MS)
+  return minutes < 1 ? 'Just asked' : `Waiting ${minutes} min`
 }

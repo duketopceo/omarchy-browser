@@ -94,3 +94,58 @@ export const INSTALL_STEPS: readonly InstallStep[] = [
     },
   },
 ]
+
+/**
+ * Manual setup, for agents that are not in the Connected agents list.
+ *
+ * Connecting a supported harness does two things: it writes the MCP entry
+ * and it installs the skill. Someone wiring an agent up by hand has to do
+ * both, and doing only the first is the failure this copy exists to stop.
+ */
+
+/** The skills.sh pack this repository publishes. */
+export const SKILLS_PACK = 'browseros-ai/browseros'
+
+/** The one skill in that pack meant for users, rather than for working on this repo. */
+export const SKILL_NAME = 'browseros-neo'
+
+/**
+ * Scoped to the single skill on purpose. `npx skills add <pack>` with no
+ * flag installs five skills, four of them ours for working on this codebase:
+ * ask-internal, write-internal-docs, sup-writing-plans and write-docs. One of
+ * those points an agent at a private repo, so none of them belong in a user's
+ * agent. Verified by running both forms.
+ */
+export const SKILL_INSTALL_COMMAND = `npx skills add ${SKILLS_PACK} --skill ${SKILL_NAME}`
+
+/** The name the MCP server should be given, matching what the skill looks for. */
+export const MCP_SERVER_NAME = 'browseros-neo'
+
+export const MANUAL_SETUP_DOCS_URL = 'https://docs.browseros.com/neo/mcp/manual'
+
+export interface ManualSetupStep {
+  id: string
+  /** Short label for the numbered heading. */
+  title: string
+  body: string
+  /** Rendered as a copyable code block when present. */
+  command?: string
+  /** Shown under the command in smaller type. */
+  note?: string
+}
+
+export const MANUAL_SETUP_STEPS: readonly ManualSetupStep[] = [
+  {
+    id: 'add-mcp',
+    title: 'Add neo to your agent',
+    body: `In your agent’s MCP settings, add a server named ${MCP_SERVER_NAME} with this address. Where that setting lives depends on the agent.`,
+    note: 'The address only works on this computer, and its port can change between BrowserOS versions, so copy it from here.',
+  },
+  {
+    id: 'install-skill',
+    title: 'Teach it how to use neo',
+    body: 'Run this once in a terminal. It tells your agent to work in its own pages, name its tasks so you can find them in History, and use this browser instead of its own.',
+    command: SKILL_INSTALL_COMMAND,
+    note: 'Run it in your project, or add -g to install it for every project.',
+  },
+]

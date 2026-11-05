@@ -1,5 +1,5 @@
 use crate::{
-    CoreError, PageId, TargetId,
+    CoreError, NativeCapabilities, PageId, TargetId,
     connection::CdpConnection,
     frames::FrameRegistry,
     input::Input,
@@ -22,8 +22,15 @@ pub struct BrowserSessionHooks {
     pub page_manager: PageManagerHooks,
 }
 
+/// Shared process runtime and global page/frame registries. Hosts use this for infrastructure;
+/// task execution receives a BrowserView so capture and admission cannot be bypassed.
 pub struct BrowserSession {
     connection: Arc<dyn CdpConnection>,
+    /// Native identity of the browser behind `connection`, fixed for the session. Every view
+    /// reads it through its session, so capture, dispatch and raw CDP share one gate decision;
+    /// hosts derive discovery from the same value they pass in here.
+    native: NativeCapabilities,
+    pub(crate) file_transfers: Arc<crate::file_transfers::TransferState>,
     pub pages: Arc<PageManager>,
     pub page_signals: Arc<PageSignals>,
     pub windows: Arc<WindowManager>,
@@ -32,8 +39,20 @@ pub struct BrowserSession {
 }
 
 impl BrowserSession {
+    /// A session whose native identity is unknown, so no gated native feature is used.
+    /// Hosts that know the browser's version use [`Self::new_with_native`].
     #[must_use]
     pub fn new(connection: Arc<dyn CdpConnection>, hooks: BrowserSessionHooks) -> Arc<Self> {
+        Self::new_with_native(connection, hooks, NativeCapabilities::default())
+    }
+
+    #[must_use]
+    pub fn new_with_native(
+        connection: Arc<dyn CdpConnection>,
+        hooks: BrowserSessionHooks,
+        native: NativeCapabilities,
+    ) -> Arc<Self> {
+        let file_transfers = crate::file_transfers::TransferState::new(connection.clone());
         let frames = FrameRegistry::new(connection.clone());
         let page_signals = PageSignals::new(connection.clone());
         let frame_hook = {
@@ -75,10 +94,15 @@ impl BrowserSession {
             on_session_attached: Some(frame_hook),
             on_page_detached: Some(detach_hook),
         };
-        let pages = Arc::new(PageManager::new(connection.clone(), page_hooks));
+        let pages = Arc::new(
+            PageManager::new(connection.clone(), page_hooks)
+                .with_file_transfers(file_transfers.clone()),
+        );
         let windows = Arc::new(WindowManager::new(connection.clone()));
         let session = Arc::new(Self {
             connection: connection.clone(),
+            native,
+            file_transfers,
             pages,
             page_signals,
             windows,
@@ -87,6 +111,15 @@ impl BrowserSession {
         });
         Self::spawn_detach_listener(session.clone());
         session
+    }
+
+    #[must_use]
+    pub fn native(&self) -> NativeCapabilities {
+        self.native
+    }
+
+    pub(crate) fn frames(&self) -> &Arc<FrameRegistry> {
+        &self.frames
     }
 
     pub async fn observe(&self, page_id: PageId) -> Arc<Observer> {
@@ -162,6 +195,24 @@ impl BrowserSession {
         Ok(Some(capture))
     }
 
+    /// A protocol handle for a session the host attached itself, such as an extension service
+    /// worker, outside the page registry. Scripts on it still go through [`crate::PageJs`].
+    #[must_use]
+    pub fn protocol_session(&self, session_id: crate::SessionId) -> crate::ProtocolSession {
+        crate::ProtocolSession::for_session(self.connection.clone(), session_id)
+    }
+
+    /// The page's main-frame document identity (`<frame id>:<loader id>`, as
+    /// snapshot refs carry it). A cross-document navigation changes it; a
+    /// same-document one keeps it.
+    pub async fn main_document_id(
+        &self,
+        page_id: PageId,
+    ) -> Result<Option<crate::snapshot::DocumentId>, CoreError> {
+        let page = self.pages.get_session(page_id).await?;
+        crate::observer::main_document_id(&page.session).await
+    }
+
     pub async fn cdp(
         &self,
         method: &str,
@@ -200,6 +251,12 @@ impl BrowserSession {
     }
 
     #[must_use]
+    /// The raw protocol connection, for work that addresses a target directly
+    /// rather than a page.
+    pub fn connection(&self) -> Arc<dyn CdpConnection> {
+        self.connection.clone()
+    }
+
     pub fn cdp_events(&self) -> broadcast::Receiver<CdpEvent> {
         self.connection.events()
     }
@@ -221,11 +278,16 @@ impl BrowserSession {
         let mut events = session.connection.events();
         tokio::spawn(async move {
             loop {
-                let Ok(event) = events.recv().await else {
-                    break;
-                };
-                if event.method == "Target.detachedFromTarget" {
-                    handle_detached_event(&session, event).await;
+                match events.recv().await {
+                    Ok(event) => {
+                        if event.method == "Target.detachedFromTarget" {
+                            handle_detached_event(&session, event).await;
+                        }
+                    }
+                    // Survive a CDP event-buffer overflow on a frame-heavy page instead of
+                    // leaving detached sessions uncleaned for the rest of the session.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         });

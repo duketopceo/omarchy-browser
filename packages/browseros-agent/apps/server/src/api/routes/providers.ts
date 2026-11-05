@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+import { LLMHeadersSchema } from '@browseros/shared/schemas/llm'
 import { zValidator } from '@hono/zod-validator'
 import { Hono } from 'hono'
 import { z } from 'zod'
@@ -25,10 +26,10 @@ const SetDefaultSchema = z.object({ providerId: z.string().min(1) })
  * migration and this table, which is what makes re-importing idempotent.
  */
 const UpsertProviderSchema = z.object({
-  profileId: z.string().nullish(),
   type: z.string().min(1),
   name: z.string().min(1),
   baseUrl: z.string().nullish(),
+  headers: LLMHeadersSchema.nullish(),
   modelId: z.string().min(1),
   supportsImages: z.boolean().optional(),
   contextWindow: z.number(),
@@ -43,18 +44,6 @@ const UpsertProviderSchema = z.object({
   reasoningSummary: z.string().nullish(),
   createdAt: z.number().optional(),
   storeInKeyring: z.boolean().optional(),
-})
-
-/**
- * Bulk one-time import from extension storage.
- *
- * Insert-if-absent, not upsert: the app writes to this table directly, so a
- * second run must fill gaps without replacing a provider edited since. Each id
- * comes back in exactly one of the two lists so the caller can report what was
- * already present.
- */
-const ImportProvidersSchema = z.object({
-  providers: z.array(UpsertProviderSchema.extend({ id: z.string().min(1) })),
 })
 
 export function createProvidersRoutes(options: { store?: ProviderStore } = {}) {
@@ -72,16 +61,6 @@ export function createProvidersRoutes(options: { store?: ProviderStore } = {}) {
         const updated = await store.setDefault(c.req.valid('json').providerId)
         if (!updated) return c.json({ error: 'Unknown provider' }, 404)
         return c.json({ provider: await store.getDefault() })
-      })
-      .post('/import', zValidator('json', ImportProvidersSchema), async (c) => {
-        const imported: string[] = []
-        const skipped: string[] = []
-        for (const { storeInKeyring: _, ...provider } of c.req.valid('json')
-          .providers) {
-          const saved = await store.insertIfAbsent(provider)
-          ;(saved ? imported : skipped).push(provider.id)
-        }
-        return c.json({ imported, skipped })
       })
       .get('/:providerId', zValidator('param', IdParamSchema), async (c) => {
         const provider = await store.get(c.req.valid('param').providerId)

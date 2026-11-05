@@ -15,15 +15,30 @@ fn protocol_source_matches_pinned_chromium_input() -> Result<(), Box<dyn Error>>
     let protocol: Value = serde_json::from_slice(PROTOCOL)?;
     assert_eq!(
         protocol["domains"].as_array().map(Vec::len),
-        Some(58),
-        "the pinned ch1 combined protocol has 58 domains"
+        Some(62),
+        "the pinned combined protocol has 62 domains, BrowserOS's Passwords and Payments included"
     );
+    // These upstream additions belong to the full snapshot even though the Rust
+    // client does not compile them into its focused surface.
+    for name in ["Ads", "DigitalCredentials"] {
+        assert!(
+            protocol["domains"]
+                .as_array()
+                .is_some_and(|domains| { domains.iter().any(|domain| domain["domain"] == name) })
+        );
+    }
     let surface: Value = serde_json::from_slice(SURFACE)?;
-    assert_eq!(
-        surface["domains"].as_array().map(Vec::len),
-        Some(9),
-        "the compiled Rust surface should remain focused"
-    );
+    assert_eq!(surface["domains"].as_array().map(Vec::len), Some(9));
+    // Generated types derive Debug, which would print passwords and card
+    // numbers. Core sends these domains as JSON through its own types instead.
+    for name in ["Passwords", "Payments"] {
+        assert!(
+            surface["domains"]
+                .as_array()
+                .is_some_and(|domains| !domains.iter().any(|domain| domain["domain"] == name)),
+            "{name} must stay out of the compiled surface"
+        );
+    }
     Ok(())
 }
 

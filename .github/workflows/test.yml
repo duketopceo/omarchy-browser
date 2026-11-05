@@ -15,9 +15,12 @@ on:
       - .github/workflows/test.yml
       - .github/workflows/build-browseros.yml
       - .github/workflows/nightly*.yml
+      - .github/workflows/reusable-build-macos-nightly.yml
       - .github/workflows/publish-server-ota.yml
       - .github/workflows/release-*.yml
       - packages/browseros-agent/**
+      # claw-server's tests check every key the shipped behaviour file documents.
+      - packages/browseros/docker/neo/neo.toml
   workflow_dispatch:
 
 permissions:
@@ -157,7 +160,7 @@ jobs:
           #!/usr/bin/env bash
           set -euo pipefail
           export APPIMAGE_EXTRACT_AND_RUN=1
-          # Chromium's hidden-window APIs require a real X11 platform.
+          # Cases that match hosted Neo's headed rendering need an X11 display.
           if [ "${BROWSEROS_TEST_HEADLESS:-true}" = "false" ]; then
             export XDG_SESSION_TYPE=x11
             exec xvfb-run --auto-servernum "$(dirname "$0")/BrowserOS.AppImage" "$@"
@@ -174,7 +177,9 @@ jobs:
         id: test
         env:
           BROWSEROS_BINARY: ${{ github.workspace }}/packages/browseros-agent/.ci/bin/browseros
-          BROWSEROS_TEST_HEADLESS: ${{ matrix.suite == 'claw-mcp' && 'false' || 'true' }}
+          # Keep the suite headless by default. Individual visual cases can
+          # request headed rendering; the wrapper starts Xvfb for those launches.
+          BROWSEROS_TEST_HEADLESS: "true"
           BROWSEROS_TEST_EXTRA_ARGS: --no-sandbox --disable-dev-shm-usage
           BROWSEROS_JUNIT_PATH: ${{ github.workspace }}/packages/browseros-agent/${{ matrix.junit_path }}
         run: |

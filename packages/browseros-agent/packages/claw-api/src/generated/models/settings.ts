@@ -13,6 +13,26 @@
  */
 
 /**
+ * User settings for the tools BrowserOS neo offers to agents.
+ * @export
+ * @interface AgentSettings
+ */
+export interface AgentSettings {
+    /**
+     * Whether agents are offered request_human_help and await_human_help. When false, agents are told to report a block in their own chat instead.
+     * @type {boolean}
+     * @memberof AgentSettings
+     */
+    humanHelpEnabled: boolean;
+    /**
+     * Whether successful MCP tool replies include a tip to close the task's tab group when finished.
+     * @type {boolean}
+     * @memberof AgentSettings
+     */
+    taskCleanupTipEnabled: boolean;
+}
+
+/**
  *
  * @export
  * @interface TelemetryState
@@ -36,6 +56,26 @@ export interface TelemetryState {
      * @memberof TelemetryState
      */
     consent: boolean;
+}
+
+/**
+ *
+ * @export
+ * @interface UpdateAgentSettingsRequest
+ */
+export interface UpdateAgentSettingsRequest {
+    /**
+     * Omit to preserve the saved human help preference.
+     * @type {boolean}
+     * @memberof UpdateAgentSettingsRequest
+     */
+    humanHelpEnabled?: boolean;
+    /**
+     * Omit to preserve the saved cleanup tip preference.
+     * @type {boolean}
+     * @memberof UpdateAgentSettingsRequest
+     */
+    taskCleanupTipEnabled?: boolean;
 }
 
 /**

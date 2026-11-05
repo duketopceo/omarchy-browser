@@ -1,6 +1,7 @@
 // ── AUTO-GENERATED from CDP protocol. DO NOT EDIT. ──
 
 import type { AccessibilityApi } from './domain-apis/accessibility'
+import type { AdsApi } from './domain-apis/ads'
 import type { AnimationApi } from './domain-apis/animation'
 import type { AuditsApi } from './domain-apis/audits'
 import type { AutofillApi } from './domain-apis/autofill'
@@ -16,6 +17,7 @@ import type { CSSApi } from './domain-apis/css'
 import type { DebuggerApi } from './domain-apis/debugger'
 import type { DeviceAccessApi } from './domain-apis/device-access'
 import type { DeviceOrientationApi } from './domain-apis/device-orientation'
+import type { DigitalCredentialsApi } from './domain-apis/digital-credentials'
 import type { DOMApi } from './domain-apis/dom'
 import type { DOMDebuggerApi } from './domain-apis/dom-debugger'
 import type { DOMSnapshotApi } from './domain-apis/dom-snapshot'
@@ -40,6 +42,8 @@ import type { MemoryApi } from './domain-apis/memory'
 import type { NetworkApi } from './domain-apis/network'
 import type { OverlayApi } from './domain-apis/overlay'
 import type { PageApi } from './domain-apis/page'
+import type { PasswordsApi } from './domain-apis/passwords'
+import type { PaymentsApi } from './domain-apis/payments'
 import type { PerformanceApi } from './domain-apis/performance'
 import type { PerformanceTimelineApi } from './domain-apis/performance-timeline'
 import type { PreloadApi } from './domain-apis/preload'
@@ -61,10 +65,13 @@ import type { WebMCPApi } from './domain-apis/web-mcp'
 
 export interface ProtocolApi {
   readonly Accessibility: AccessibilityApi
+  readonly Ads: AdsApi
   readonly Animation: AnimationApi
   readonly Audits: AuditsApi
   readonly Autofill: AutofillApi
   readonly Bookmarks: BookmarksApi
+  readonly Passwords: PasswordsApi
+  readonly Payments: PaymentsApi
   readonly BackgroundService: BackgroundServiceApi
   readonly BluetoothEmulation: BluetoothEmulationApi
   readonly Browser: BrowserApi
@@ -78,6 +85,7 @@ export interface ProtocolApi {
   readonly DOMStorage: DOMStorageApi
   readonly DeviceAccess: DeviceAccessApi
   readonly DeviceOrientation: DeviceOrientationApi
+  readonly DigitalCredentials: DigitalCredentialsApi
   readonly Emulation: EmulationApi
   readonly EventBreakpoints: EventBreakpointsApi
   readonly Extensions: ExtensionsApi

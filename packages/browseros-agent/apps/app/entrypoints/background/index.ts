@@ -1,17 +1,19 @@
+import { registerDiagnostics } from '@browseros/diagnostics/extension'
 import { storage } from '@wxt-dev/storage'
 import { Capabilities } from '@/lib/browseros/capabilities'
 import { createConversationPanelBroker } from '@/lib/browseros/conversationPanelBroker.browser'
-import { getHealthCheckUrl, getMcpServerUrl } from '@/lib/browseros/helpers'
 import {
-  ensureSidePanelRuntimeStateLoaded,
+  getAgentServerUrl,
+  getHealthCheckUrl,
+  getMcpServerUrl,
+} from '@/lib/browseros/helpers'
+import {
   initializeSidePanelOptions,
   openSidePanel,
-  registerSidePanelOpenStateListeners,
-  setSidePanelPerWindowPreference,
+  prepareTabSidePanel,
   toggleSidePanel,
 } from '@/lib/browseros/toggleSidePanel'
 import { checkAndShowChangelog } from '@/lib/changelog/changelog-notifier'
-import { setupLlmProvidersBackupToBrowserOS } from '@/lib/llm-providers/storage'
 import { fetchMcpTools } from '@/lib/mcp/client'
 import {
   onRuntimeMessage,
@@ -19,39 +21,50 @@ import {
 } from '@/lib/messaging/runtime/runtimeMessages'
 import { onServerMessage } from '@/lib/messaging/server/serverMessages'
 import { onOpenSidePanelWithSearch } from '@/lib/messaging/sidepanel/openSidepanelWithSearch'
-import { authRedirectPathStorage } from '@/lib/onboarding/onboardingStorage'
 import { searchActionsStorage } from '@/lib/search-actions/searchActionsStorage'
 import { selectedTextStorage } from '@/lib/selected-text/selectedTextStorage'
 import { stopAgentStorage } from '@/lib/stop-agent/stop-agent-storage'
-import { startLocalFirstMigration } from '@/modules/local-first-migration/start-local-first-migration'
 import { scheduledJobRuns } from './scheduledJobRuns'
 
-const LEGACY_TOOL_APPROVAL_STORAGE_KEYS = [
+const RETIRED_STORAGE_KEYS = [
+  // The unshipped Tool Approvals feature.
   'local:tool-approval-config',
   'local:pending-tool-approvals',
   'local:approval-responses',
   'local:tool-execution-log',
+  // Mirrored the selected chat target, which the server now holds alone.
+  'local:sidepanel-chat-target-selection',
 ] as const
 
-/**
- * Removes persisted state for the unshipped Tool Approvals feature during extension updates.
- */
-const cleanupLegacyToolApprovalStorage = async () => {
-  await storage.removeItems([...LEGACY_TOOL_APPROVAL_STORAGE_KEYS])
+/** Drops state belonging to features that no longer read it. */
+const cleanupRetiredStorage = async () => {
+  await storage.removeItems([...RETIRED_STORAGE_KEYS])
 }
 
 export default defineBackground(() => {
+  registerDiagnostics('browseros', getAgentServerUrl)
   // One background broker owns the long-lived server subscription and all
   // panel-routing effects; individual React panels can come and go freely.
   const conversationPanelBroker = createConversationPanelBroker()
   void conversationPanelBroker.start()
 
-  registerSidePanelOpenStateListeners()
-  ensureSidePanelRuntimeStateLoaded().catch(() => null)
+  // Registration never opens a panel. Per-tab URLs let panels opened by the
+  // native Alt+A shortcut identify their owner without following tab switches.
+  const preparePanel = (tabId: number) => {
+    void prepareTabSidePanel(tabId).catch(() => undefined)
+  }
+  void initializeSidePanelOptions()
+    .then(async () => {
+      for (const tab of await chrome.tabs.query({})) {
+        if (tab.id !== undefined) preparePanel(tab.id)
+      }
+    })
+    .catch(() => undefined)
+  chrome.tabs.onCreated.addListener((tab) => {
+    if (tab.id !== undefined) preparePanel(tab.id)
+  })
 
   Capabilities.initialize().catch(() => null)
-  setupLlmProvidersBackupToBrowserOS()
-  startLocalFirstMigration()
 
   scheduledJobRuns()
 
@@ -90,32 +103,13 @@ export default defineBackground(() => {
     }
 
     if (details.reason === chrome.runtime.OnInstalledReason.UPDATE) {
-      cleanupLegacyToolApprovalStorage().catch(() => null)
+      cleanupRetiredStorage().catch(() => null)
       checkAndShowChangelog().catch(() => null)
     }
   })
 
   onRuntimeMessage(RuntimeMessageType.getTabId, ({ sender }) => {
     return { tabId: sender.tab?.id }
-  })
-
-  onRuntimeMessage(RuntimeMessageType.authSuccess, async ({ sender }) => {
-    if (!sender.tab?.id) return
-
-    const tabId = sender.tab.id
-
-    try {
-      const redirectPath = await authRedirectPathStorage.getValue()
-      const hash = redirectPath || '/home'
-      await chrome.tabs.update(tabId, {
-        url: chrome.runtime.getURL(`app.html#${hash}`),
-      })
-      if (redirectPath) await authRedirectPathStorage.removeValue()
-    } catch {
-      await chrome.tabs.update(tabId, {
-        url: chrome.runtime.getURL('app.html#/home'),
-      })
-    }
   })
 
   onRuntimeMessage(RuntimeMessageType.stopAgent, async ({ data }) => {
@@ -125,14 +119,8 @@ export default defineBackground(() => {
     })
   })
 
-  onRuntimeMessage(
-    RuntimeMessageType.sidePanelScopeChanged,
-    async ({ data }) => {
-      await setSidePanelPerWindowPreference(data.perWindow)
-    },
-  )
-
   chrome.tabs.onRemoved.addListener((tabId) => {
+    void conversationPanelBroker.removeTab(tabId).catch(() => undefined)
     const key = String(tabId)
     selectedTextStorage.getValue().then((map) => {
       if (map[key]) {

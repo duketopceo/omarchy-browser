@@ -1,6 +1,5 @@
 use crate::{
-    CoreError, FrameId, ProtocolSession, input::geometry::resolve_object_id, observer::Observer,
-    snapshot::RefEntry,
+    CoreError, FrameId, PageJs, ProtocolSession, observer::Observer, pointer, snapshot::RefEntry,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -53,8 +52,10 @@ pub struct ScreenshotCaptureOptions {
     pub clip: Option<Viewport>,
 }
 
-/// Viewport boxes are viewport-relative and apply the clip scale. Full-page
-/// boxes add the sampled scroll offsets when that best-effort read succeeds.
+/// Boxes are in the image's own pixels, so they line up with what the caller sees: CSS
+/// boxes times the clip scale and the device pixel ratio. Viewport boxes are
+/// viewport-relative; full-page boxes add the sampled scroll offsets when that best-effort
+/// read succeeds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScreenshotAnnotationBox {
     pub x: i64,
@@ -99,16 +100,6 @@ struct Rect {
 #[derive(Debug, Deserialize)]
 struct CaptureScreenshotResult {
     data: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct RuntimeResult {
-    result: RemoteObject,
-}
-
-#[derive(Debug, Deserialize)]
-struct RemoteObject {
-    value: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -159,12 +150,17 @@ async fn capture_plain_screenshot(
 ) -> Result<ScreenshotCaptureResult, CoreError> {
     let format = options.format.unwrap_or(ScreenshotFormat::Png);
     let full_page = options.full_page.unwrap_or(false);
-    let result: CaptureScreenshotResult = page_session
-        .send(
+    let hidden = pointer::hide_for_capture(page_session).await;
+    let result = page_session
+        .send::<_, CaptureScreenshotResult>(
             "Page.captureScreenshot",
             screenshot_params(format, options.quality, full_page, options.clip),
         )
-        .await?;
+        .await;
+    if hidden {
+        pointer::restore_after_capture(page_session).await;
+    }
+    let result = result?;
     Ok(ScreenshotCaptureResult {
         data: result.data,
         mime_type: format!("image/{}", format.as_str()),
@@ -180,8 +176,6 @@ async fn capture_annotated_screenshot(
     let format = options.format.unwrap_or(ScreenshotFormat::Png);
     let full_page = options.full_page.unwrap_or(false);
     let token = create_overlay_token();
-    let object_group = token.clone();
-    let mut object_sessions = Vec::new();
     let mut overlay_injected = false;
 
     let result = async {
@@ -198,13 +192,7 @@ async fn capture_annotated_screenshot(
             read_viewport_rect(&page_session).await.ok()
         };
         let annotations = clip_annotations(
-            collect_annotations(
-                &page_session,
-                &observer,
-                &object_group,
-                &mut object_sessions,
-            )
-            .await?,
+            collect_annotations(&page_session, &observer).await?,
             capture_area,
         );
         let scroll = if full_page {
@@ -212,29 +200,38 @@ async fn capture_annotated_screenshot(
         } else {
             None
         };
+        // Boxes are measured in CSS pixels; the image has clip.scale times the device pixel
+        // ratio of them per CSS pixel (a full-page capture has no clip and keeps device pixels).
+        let image_scale = if annotations.is_empty() {
+            1.0
+        } else {
+            read_device_pixel_ratio(&page_session).await
+                * if full_page {
+                    1.0
+                } else {
+                    options.clip.map_or(1.0, |clip| clip.scale)
+                }
+        };
         if !annotations.is_empty() {
             inject_annotation_overlay(&page_session, &token, full_page, &annotations, scroll)
                 .await?;
             overlay_injected = true;
         }
-        let captured: CaptureScreenshotResult = page_session
-            .send(
+        let hidden = pointer::hide_for_capture(&page_session).await;
+        let captured = page_session
+            .send::<_, CaptureScreenshotResult>(
                 "Page.captureScreenshot",
                 screenshot_params(format, options.quality, full_page, options.clip),
             )
-            .await?;
+            .await;
+        if hidden {
+            pointer::restore_after_capture(&page_session).await;
+        }
+        let captured = captured?;
         Ok(ScreenshotCaptureResult {
             data: captured.data,
             mime_type: format!("image/{}", format.as_str()),
-            annotations: project_annotations(
-                &annotations,
-                scroll,
-                if full_page {
-                    None
-                } else {
-                    options.clip.map(|clip| clip.scale)
-                },
-            ),
+            annotations: project_annotations(&annotations, scroll, Some(image_scale)),
         })
     }
     .await;
@@ -242,7 +239,6 @@ async fn capture_annotated_screenshot(
     if overlay_injected {
         let _ = remove_annotation_overlay(&page_session, &token).await;
     }
-    release_object_group(&object_sessions, &object_group).await;
     result
 }
 
@@ -282,8 +278,6 @@ fn screenshot_params(
 async fn collect_annotations(
     page_session: &ProtocolSession,
     observer: &Observer,
-    object_group: &str,
-    object_sessions: &mut Vec<ProtocolSession>,
 ) -> Result<Vec<RawAnnotation>, CoreError> {
     let snapshot = observer.snapshot().await?;
     let mut entries = snapshot
@@ -296,15 +290,7 @@ async fn collect_annotations(
 
     let mut out = Vec::new();
     for entry in entries {
-        if let Some(annotation) = collect_annotation(
-            page_session,
-            observer,
-            object_group,
-            object_sessions,
-            &entry,
-        )
-        .await
-        {
+        if let Some(annotation) = collect_annotation(page_session, observer, &entry).await {
             out.push(annotation);
         }
     }
@@ -314,27 +300,12 @@ async fn collect_annotations(
 async fn collect_annotation(
     page_session: &ProtocolSession,
     observer: &Observer,
-    object_group: &str,
-    object_sessions: &mut Vec<ProtocolSession>,
     entry: &RefEntry,
 ) -> Option<RawAnnotation> {
     let resolved = observer.resolve_ref(&entry.ref_id).await.ok()?;
-    let local_rect = read_element_rect(
-        &resolved.session,
-        resolved.backend_node_id,
-        object_group,
-        object_sessions,
-    )
-    .await?;
+    let local_rect = read_element_rect(&resolved.session, resolved.backend_node_id).await?;
     let rect = if let Some(frame_id) = &entry.frame_id {
-        project_frame_rect(
-            page_session,
-            object_group,
-            object_sessions,
-            frame_id,
-            local_rect,
-        )
-        .await?
+        project_frame_rect(page_session, frame_id, local_rect).await?
     } else {
         local_rect
     };
@@ -349,8 +320,6 @@ async fn collect_annotation(
 
 async fn project_frame_rect(
     page_session: &ProtocolSession,
-    object_group: &str,
-    object_sessions: &mut Vec<ProtocolSession>,
     frame_id: &FrameId,
     rect: Rect,
 ) -> Option<Rect> {
@@ -361,13 +330,7 @@ async fn project_frame_rect(
         .send::<_, FrameOwnerResult>("DOM.getFrameOwner", json!({ "frameId": frame_id.as_str() }))
         .await
         .ok()?;
-    let offset = read_frame_content_offset(
-        page_session,
-        owner.backend_node_id,
-        object_group,
-        object_sessions,
-    )
-    .await?;
+    let offset = read_frame_content_offset(page_session, owner.backend_node_id).await?;
     Some(Rect {
         x: offset.x + rect.x,
         y: offset.y + rect.y,
@@ -376,53 +339,31 @@ async fn project_frame_rect(
     })
 }
 
-async fn read_element_rect(
-    session: &ProtocolSession,
-    backend_node_id: i64,
-    object_group: &str,
-    object_sessions: &mut Vec<ProtocolSession>,
-) -> Option<Rect> {
-    let object_id = resolve_object_id(session, backend_node_id, Some(object_group))
-        .await
-        .ok()?;
-    object_sessions.push(session.clone());
-    let result: RuntimeResult = session
-        .send(
-            "Runtime.callFunctionOn",
-            json!({
-                "functionDeclaration": "function(){var r=this.getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height}}",
-                "objectId": object_id,
-                "returnByValue": true
-            }),
+async fn read_element_rect(session: &ProtocolSession, backend_node_id: i64) -> Option<Rect> {
+    let value: Value = PageJs::isolated(session)
+        .call(
+            backend_node_id,
+            "function(){var r=this.getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height}}",
+            &[],
         )
         .await
         .ok()?;
-    let rect = parse_rect(result.result.value?)?;
+    let rect = parse_rect(value)?;
     (rect.width > 0.0 && rect.height > 0.0).then_some(rect)
 }
 
 async fn read_frame_content_offset(
     session: &ProtocolSession,
     backend_node_id: i64,
-    object_group: &str,
-    object_sessions: &mut Vec<ProtocolSession>,
 ) -> Option<PointOffset> {
-    let object_id = resolve_object_id(session, backend_node_id, Some(object_group))
-        .await
-        .ok()?;
-    object_sessions.push(session.clone());
-    let result: RuntimeResult = session
-        .send(
-            "Runtime.callFunctionOn",
-            json!({
-                "functionDeclaration": "function(){var r=this.getBoundingClientRect();return{x:r.x+(this.clientLeft||0),y:r.y+(this.clientTop||0)}}",
-                "objectId": object_id,
-                "returnByValue": true
-            }),
+    let value: Value = PageJs::isolated(session)
+        .call(
+            backend_node_id,
+            "function(){var r=this.getBoundingClientRect();return{x:r.x+(this.clientLeft||0),y:r.y+(this.clientTop||0)}}",
+            &[],
         )
         .await
         .ok()?;
-    let value = result.result.value?;
     Some(PointOffset {
         x: value.get("x")?.as_f64()?,
         y: value.get("y")?.as_f64()?,
@@ -456,17 +397,10 @@ fn find_frame_depth(node: &FrameTreeNode, frame_id: &FrameId, depth: usize) -> O
 }
 
 async fn read_viewport_rect(session: &ProtocolSession) -> Result<Rect, CoreError> {
-    let result: RuntimeResult = session
-        .send(
-            "Runtime.evaluate",
-            json!({
-                "expression": "({x:0,y:0,width:window.innerWidth||0,height:window.innerHeight||0})",
-                "returnByValue": true,
-                "awaitPromise": false
-            }),
-        )
+    let value: Value = PageJs::isolated(session)
+        .eval("({x:0,y:0,width:window.innerWidth||0,height:window.innerHeight||0})")
         .await?;
-    Ok(result.result.value.and_then(parse_rect).unwrap_or(Rect {
+    Ok(parse_rect(value).unwrap_or(Rect {
         x: 0.0,
         y: 0.0,
         width: 0.0,
@@ -474,18 +408,20 @@ async fn read_viewport_rect(session: &ProtocolSession) -> Result<Rect, CoreError
     }))
 }
 
+async fn read_device_pixel_ratio(session: &ProtocolSession) -> f64 {
+    PageJs::isolated(session)
+        .eval::<Option<f64>>("window.devicePixelRatio")
+        .await
+        .ok()
+        .flatten()
+        .filter(|ratio| ratio.is_finite() && *ratio > 0.0)
+        .unwrap_or(1.0)
+}
+
 async fn read_scroll_offsets(session: &ProtocolSession) -> Result<PointOffset, CoreError> {
-    let result: RuntimeResult = session
-        .send(
-            "Runtime.evaluate",
-            json!({
-                "expression": "({x: window.scrollX || 0, y: window.scrollY || 0})",
-                "returnByValue": true,
-                "awaitPromise": false
-            }),
-        )
+    let value: Value = PageJs::isolated(session)
+        .eval("({x: window.scrollX || 0, y: window.scrollY || 0})")
         .await?;
-    let value = result.result.value.unwrap_or(Value::Null);
     Ok(PointOffset {
         x: value.get("x").and_then(Value::as_f64).unwrap_or(0.0),
         y: value.get("y").and_then(Value::as_f64).unwrap_or(0.0),
@@ -599,12 +535,7 @@ async fn inject_annotation_overlay(
             if full_page { "true" } else { "false" },
         )
         .replace("__BROWSEROS_SCROLL__", &scroll_json.to_string());
-    let _: Value = session
-        .send(
-            "Runtime.evaluate",
-            json!({ "expression": expression, "returnByValue": true, "awaitPromise": false }),
-        )
-        .await?;
+    let _: Value = PageJs::isolated(session).eval(&expression).await?;
     Ok(())
 }
 
@@ -618,24 +549,8 @@ async fn remove_annotation_overlay(
     let expression = format!(
         "(() => {{ var attr = {attr}; var token = {token}; var existing = document.querySelectorAll('[' + attr + ']'); for (var i = 0; i < existing.length; i++) {{ if (existing[i].getAttribute(attr) === token) existing[i].remove(); }} return true; }})()"
     );
-    let _: Value = session
-        .send(
-            "Runtime.evaluate",
-            json!({ "expression": expression, "returnByValue": true, "awaitPromise": false }),
-        )
-        .await?;
+    let _: Value = PageJs::isolated(session).eval(&expression).await?;
     Ok(())
-}
-
-async fn release_object_group(sessions: &[ProtocolSession], object_group: &str) {
-    for session in sessions {
-        let _ = session
-            .send::<_, Value>(
-                "Runtime.releaseObjectGroup",
-                json!({ "objectGroup": object_group }),
-            )
-            .await;
-    }
 }
 
 async fn run_exclusive_screenshot_capture<F, Fut, T>(
@@ -683,4 +598,63 @@ fn annotation_number(ref_id: &str) -> i64 {
         .strip_prefix('e')
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ScreenshotCaptureOptions, capture_plain_screenshot};
+    use crate::{ProtocolSession, test_support::TestConnection};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn tests_that_plain_capture_restores_the_pointer_after_success_and_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for succeeds in [true, false] {
+            let mut replies = vec![
+                ("Runtime.evaluate", json!({ "result": { "value": true } })),
+                ("Runtime.evaluate", json!({ "result": { "value": true } })),
+            ];
+            if succeeds {
+                replies.push(("Page.captureScreenshot", json!({ "data": "cG5n" })));
+            }
+            let connection = TestConnection::new(replies);
+            let session = ProtocolSession::root(connection.clone());
+            let result =
+                capture_plain_screenshot(&session, &ScreenshotCaptureOptions::default()).await;
+            assert_eq!(result.is_ok(), succeeds);
+            if let Ok(capture) = result {
+                assert_eq!(capture.data, "cG5n");
+            }
+            let calls = connection.calls()?;
+            assert_eq!(calls.len(), 3);
+            assert!(
+                calls[0].params["expression"]
+                    .as_str()
+                    .is_some_and(|js| js.contains("p.hide()"))
+            );
+            assert_eq!(calls[1].method, "Page.captureScreenshot");
+            assert!(
+                calls[2].params["expression"]
+                    .as_str()
+                    .is_some_and(|js| js.contains("p.show()"))
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tests_that_plain_capture_survives_a_failed_pointer_hide()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let connection =
+            TestConnection::new([("Page.captureScreenshot", json!({ "data": "cG5n" }))]);
+        let session = ProtocolSession::root(connection.clone());
+        let capture =
+            capture_plain_screenshot(&session, &ScreenshotCaptureOptions::default()).await?;
+        assert_eq!(capture.data, "cG5n");
+        let calls = connection.calls()?;
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].method, "Runtime.evaluate");
+        assert_eq!(calls[1].method, "Page.captureScreenshot");
+        Ok(())
+    }
 }

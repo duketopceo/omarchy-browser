@@ -1,21 +1,17 @@
 import { useChat } from '@ai-sdk/react'
+import { useQueryClient } from '@tanstack/react-query'
 import { DefaultChatTransport, type FileUIPart, type UIMessage } from 'ai'
 import { compact } from 'es-toolkit/array'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import useDeepCompareEffect from 'use-deep-compare-effect'
 import type { Provider } from '@/components/chat/chatComponentTypes'
-import { useSessionInfo } from '@/lib/auth/sessionStorage'
 import {
   conversationForTab,
   conversationPanelViewsStorage,
 } from '@/lib/browseros/conversationPanelStorage'
 import { isIncognitoWindow } from '@/lib/browseros/incognito'
-import {
-  getWindowConversation,
-  setWindowConversation,
-} from '@/lib/browseros/perWindowConversationStorage'
-import { sidePanelPerWindowStorage } from '@/lib/browseros/sidePanelOpenStateStorage'
+import { resolvePanelTabId } from '@/lib/browseros/panelTab'
 import type { ChatAction } from '@/lib/chat-actions/types'
 import {
   CONVERSATION_RESET_EVENT,
@@ -28,7 +24,6 @@ import {
 import { formatConversationHistory } from '@/lib/conversations/formatConversationHistory'
 import { declinedAppsStorage } from '@/lib/declined-apps/storage'
 import { resolveChatProvider } from '@/lib/llm-providers/provider-runtime'
-import { createDefaultBrowserOSProvider } from '@/lib/llm-providers/storage'
 import type { ChatRequestBrowserContext } from '@/lib/messaging/server/buildChatRequestBody'
 import { track } from '@/lib/metrics/track'
 import { searchActionsStorage } from '@/lib/search-actions/searchActionsStorage'
@@ -36,13 +31,14 @@ import { selectedTextStorage } from '@/lib/selected-text/selectedTextStorage'
 import { sentry } from '@/lib/sentry/sentry'
 import { stopAgentStorage } from '@/lib/stop-agent/stop-agent-storage'
 import { selectedWorkspaceStorage } from '@/lib/workspace/workspace-storage'
-import { resolveAgentServerUrlWithRetry } from '@/modules/browseros/agent-server-url.helpers'
+import { resolveAgentServerUrl } from '@/modules/browseros/agent-server-url.helpers'
 import { useAgentServerUrl } from '@/modules/browseros/agent-server-url.hooks'
-import { fetchServerConversation } from '@/modules/conversations/conversations.hooks'
-import { useInvalidateCredits } from '@/modules/credits/credits.hooks'
-import { useGraphqlQuery } from '@/modules/graphql/graphql-query.hooks'
+import {
+  fetchServerConversation,
+  SERVER_CONVERSATIONS_QUERY_KEY,
+} from '@/modules/conversations/conversations.hooks'
 import { useChatRefs } from './chat-refs.hooks'
-import { GetConversationWithMessagesDocument } from './chat-session-document'
+import { decideChatSend, drainPendingSends } from './chat-send-decision'
 import {
   didStreamingTurnFinish,
   getPersistableMessages,
@@ -52,7 +48,10 @@ import {
   prepareSidepanelSendMessagesRequest,
   toProviderOption,
 } from './chat-session-request'
-import { restoreServerConversation } from './chat-session-restore'
+import {
+  resolveRestoredChatTarget,
+  restoreServerConversation,
+} from './chat-session-restore'
 import type { ChatMode } from './chat-types'
 import { addContentFilterNotice } from './content-filter-notice'
 import {
@@ -60,6 +59,7 @@ import {
   fetchConversationRunState,
 } from './conversation-run-client'
 import { useExecutionHistoryTracker } from './execution-history-tracker.hooks'
+import { PanelConversationAttachment } from './panel-conversation-attachment'
 import { toLlmProviderConfig } from './sidepanel-chat-targets'
 import { stripImageToolOutputs } from './tool-output-strip'
 
@@ -188,8 +188,10 @@ export const useChatSession = (options?: ChatSessionOptions) => {
     selectChatTarget,
     selectedLlmProvider,
     isLoadingProviders,
+    hasAnyTarget,
+    isSettled,
   } = useChatRefs()
-  const invalidateCredits = useInvalidateCredits()
+  const queryClient = useQueryClient()
 
   // Incognito chats are never written to history or the cloud (#1189). Resolved
   // from the hosting window on mount (chrome.extension.inIncognitoContext is
@@ -213,23 +215,22 @@ export const useChatSession = (options?: ChatSessionOptions) => {
     error: agentUrlError,
   } = useAgentServerUrl()
 
-  // Identity is still needed to read a cloud conversation back. Nothing on
-  // this screen writes to the cloud any more.
-  const { sessionInfo } = useSessionInfo()
-  const userId = sessionInfo.user?.id
-  const isLoggedIn = !!userId
   const [searchParams, setSearchParams] = useSearchParams()
+  const setSearchParamsRef = useRef(setSearchParams)
+  setSearchParamsRef.current = setSearchParams
   const conversationIdParam = searchParams.get('conversationId')
+  const [restoreError, setRestoreError] = useState<string | null>(null)
+  const [restoreAttempt, setRestoreAttempt] = useState(0)
+  const [restoredConversationId, setRestoredConversationId] = useState<
+    string | null
+  >(null)
+  const isRestoringConversation =
+    !!conversationIdParam && restoredConversationId !== conversationIdParam
 
-  // 'local': the local server owns history, persisting it to SQLite during
-  // /chat. Every signed-in user now takes this path too, where the client used
-  // to upload their turns to the cloud instead. 'cloud' survives only as the
-  // incognito case, where it means nothing is persisted at all, because the
-  // client no longer writes anywhere.
   // Read via a ref because the transport closure below is created only once.
-  const historyModeRef = useRef<'local' | 'cloud'>('cloud')
+  const persistRef = useRef(persistHistory)
   useEffect(() => {
-    historyModeRef.current = persistHistory ? 'local' : 'cloud'
+    persistRef.current = persistHistory
   }, [persistHistory])
 
   const agentUrlRef = useRef(agentServerUrl)
@@ -238,7 +239,31 @@ export const useChatSession = (options?: ChatSessionOptions) => {
     agentUrlRef.current = agentServerUrl
   }, [agentServerUrl])
 
-  const canSend = !isLoadingAgentUrl && !agentUrlError && !!agentServerUrl
+  // Read through a ref because the search-action watcher below installs once
+  // and would otherwise keep the value from first render, when nothing has
+  // loaded yet and every send would look unsendable.
+  const hasAnyTargetRef = useRef(hasAnyTarget)
+  const isSettledRef = useRef(isSettled)
+
+  useEffect(() => {
+    hasAnyTargetRef.current = hasAnyTarget
+  }, [hasAnyTarget])
+
+  useEffect(() => {
+    isSettledRef.current = isSettled
+  }, [isSettled])
+
+  const [sendAttemptBlocked, setSendAttemptBlocked] = useState(false)
+  // Derived rather than cleared in an effect: connecting a provider makes this
+  // false on the next render on its own.
+  const sendBlocked = sendAttemptBlocked && !hasAnyTarget
+
+  const canSend =
+    !isLoadingAgentUrl &&
+    !agentUrlError &&
+    !!agentServerUrl &&
+    !isRestoringConversation &&
+    !restoreError
 
   const providers: Provider[] = chatTargets.map(toProviderOption)
 
@@ -251,8 +276,18 @@ export const useChatSession = (options?: ChatSessionOptions) => {
   const [conversationId, setConversationId] = useState(crypto.randomUUID())
   const conversationIdRef = useRef(conversationId)
   const optionsRef = useRef(options)
-  // The window this panel belongs to, resolved on mount in per-window scope.
-  const windowIdRef = useRef<number | null>(null)
+  const panelTabRef = useRef<Promise<number | undefined> | undefined>(undefined)
+  const attachmentRef = useRef<PanelConversationAttachment | undefined>(
+    undefined,
+  )
+  const localStreamConversationRef = useRef<string | undefined>(undefined)
+  const localStreamRunRef = useRef<string | undefined>(undefined)
+  const streamRequestRef = useRef<Promise<void> | undefined>(undefined)
+  const viewTransitionRef = useRef<Promise<void>>(Promise.resolve())
+  const owningTab = () => {
+    panelTabRef.current ??= resolvePanelTabId()
+    return panelTabRef.current
+  }
 
   useEffect(() => {
     optionsRef.current = options
@@ -355,25 +390,42 @@ export const useChatSession = (options?: ChatSessionOptions) => {
   const transportRef = useRef<DefaultChatTransport<UIMessage> | null>(null)
   if (!transportRef.current) {
     transportRef.current = new DefaultChatTransport<UIMessage>({
-      prepareReconnectToStreamRequest: async () => {
-        const serverUrl = await resolveAgentServerUrlWithRetry()
+      prepareReconnectToStreamRequest: async ({ body }) => {
+        const serverUrl = await resolveAgentServerUrl()
         return {
-          api: conversationReconnectUrl(serverUrl, conversationIdRef.current),
+          api: conversationReconnectUrl(
+            serverUrl,
+            typeof body?.conversationId === 'string'
+              ? body.conversationId
+              : conversationIdRef.current,
+            typeof body?.runId === 'string' ? body.runId : undefined,
+          ),
         }
       },
       prepareSendMessagesRequest: async ({ messages }) => {
         const target = selectedChatTargetRef.current
+        // No fabricated fallback. Sending a provider the user never configured
+        // would run the turn on credentials they did not choose; sending
+        // nothing lets the server resolve its own selection, or say there is
+        // none.
         const fallbackProvider =
           resolveChatProvider(
             selectedLlmProviderRef.current
               ? [selectedLlmProviderRef.current]
               : [],
-          ) ?? createDefaultBrowserOSProvider()
-        const activeTabsList = await chrome.tabs.query({
-          active: true,
-          currentWindow: true,
-        })
-        const activeTab = activeTabsList?.[0] ?? undefined
+          ) ?? undefined
+        // A contextual panel sends from its owning tab even if another tab
+        // becomes active while provider/server preparation is awaiting I/O.
+        const tabId =
+          optionsRef.current?.origin === 'newtab'
+            ? undefined
+            : await owningTab()
+        const activeTab =
+          tabId !== undefined
+            ? await chrome.tabs.get(tabId)
+            : (
+                await chrome.tabs.query({ active: true, currentWindow: true })
+              )[0]
         const activeTabSelection = activeTab?.id
           ? (selectionMapRef.current[String(activeTab.id)] ?? null)
           : null
@@ -390,12 +442,13 @@ export const useChatSession = (options?: ChatSessionOptions) => {
         })
 
         const declinedApps = await declinedAppsStorage.getValue()
-        const historyMode = historyModeRef.current
+        const persist = persistRef.current
         const previousMessages = messagesRef.current
-        // In local mode the server owns history and loads it from SQLite, so
-        // the client stops replaying it. Cloud mode still ships the projection.
+        // When the server persists, it owns history and loads it itself, so
+        // the client stops replaying it. Only an unpersisted conversation has
+        // to ship its own projection.
         const history =
-          historyMode === 'cloud' && previousMessages.length > 0
+          !persist && previousMessages.length > 0
             ? formatConversationHistory(previousMessages)
             : undefined
         const previousConversation = history?.length ? history : undefined
@@ -411,7 +464,7 @@ export const useChatSession = (options?: ChatSessionOptions) => {
           userSystemPrompt,
           userWorkingDir: workingDirRef.current,
           previousConversation,
-          historyMode,
+          persist,
           declinedApps,
           attachments: getLastUserMessageFiles(messages).map((file) => ({
             mediaType: file.mediaType,
@@ -422,7 +475,7 @@ export const useChatSession = (options?: ChatSessionOptions) => {
         const message = getLastMessageText(messages)
 
         const result = await prepareSidepanelSendMessagesRequest({
-          resolveAgentServerUrl: resolveAgentServerUrlWithRetry,
+          resolveAgentServerUrl,
           target,
           fallbackProvider,
           message,
@@ -458,6 +511,12 @@ export const useChatSession = (options?: ChatSessionOptions) => {
     regenerate,
   } = useChat({
     transport: chatTransport,
+    onError: () => {
+      // A failed local POST belongs to the user's Retry action. Only mirrored
+      // stream failures should rehydrate; replaying an older run here would
+      // erase the failed prompt and hide the provider error in the source panel.
+      if (!localStreamConversationRef.current) attachmentRef.current?.retry()
+    },
     onFinish: async ({ message, messages, isAbort, isError, finishReason }) => {
       const nextMessages = addContentFilterNotice(
         messages,
@@ -477,21 +536,31 @@ export const useChatSession = (options?: ChatSessionOptions) => {
     },
   })
 
-  const statusRef = useRef(status)
+  const detachView = useCallback(async () => {
+    await detachStream()
+    // SDK stop signals cancellation immediately; await the request's unwind
+    // before installing another transcript so old onFinish work cannot mutate it.
+    await streamRequestRef.current?.catch(() => undefined)
+  }, [detachStream])
+
   useEffect(() => {
-    statusRef.current = status
-  }, [status])
+    if (options?.origin !== 'newtab') return
+    // Leaving a routed chat detaches its view; the server still owns the run.
+    return () => {
+      void detachView()
+    }
+  }, [detachView, options?.origin])
 
   const stop = useCallback(async () => {
     // First detach this view so the UI responds immediately, then cancel the
     // server-owned run explicitly. Aborting the fetch alone is intentionally
     // no longer a lifecycle signal.
-    await detachStream()
+    const stoppedConversationId = conversationIdRef.current
+    const detaching = detachView()
     try {
-      const serverUrl =
-        agentUrlRef.current ?? (await resolveAgentServerUrlWithRetry())
+      const serverUrl = agentUrlRef.current ?? (await resolveAgentServerUrl())
       const response = await fetch(
-        `${serverUrl}/chat/${encodeURIComponent(conversationIdRef.current)}/stop`,
+        `${serverUrl}/chat/${encodeURIComponent(stoppedConversationId)}/stop`,
         { method: 'POST' },
       )
       if (!response.ok) {
@@ -504,106 +573,87 @@ export const useChatSession = (options?: ChatSessionOptions) => {
           operation: 'stop-server-conversation',
         },
       })
+    } finally {
+      await detaching
     }
-  }, [detachStream])
+  }, [detachView])
 
-  const attachedPanelRunRef = useRef('')
-  // The background broker owns routing; this view only hydrates the broker's
-  // selected conversation and reconnects to its server stream. Switching tabs
-  // detaches the old subscriber without stopping either server-owned run.
   useEffect(() => {
     if (optionsRef.current?.origin === 'newtab') return
-
     let cancelled = false
-    let attachEpoch = 0
-    let panelTabId: number | undefined
-    let panelWindowId: number | undefined
-    const attachForViews = async (
-      views: Awaited<ReturnType<typeof conversationPanelViewsStorage.getValue>>,
-    ) => {
-      const view = conversationForTab(views, panelTabId)
-      if (!view) return
-      const runKey = `${view.conversationId}:${view.runId}`
-      if (attachedPanelRunRef.current === runKey) return
-
-      // The panel that submitted this turn already owns the POST stream. The
-      // presence event only teaches it the server run id for future deduping.
-      if (
-        view.conversationId === conversationIdRef.current &&
-        (statusRef.current === 'submitted' || statusRef.current === 'streaming')
-      ) {
-        attachedPanelRunRef.current = runKey
-        return
-      }
-
-      attachedPanelRunRef.current = runKey
-      const epoch = ++attachEpoch
-      try {
-        const serverUrl =
-          agentUrlRef.current ?? (await resolveAgentServerUrlWithRetry())
-        const state = await fetchConversationRunState(
-          serverUrl,
-          view.conversationId,
-        )
-        if (cancelled || epoch !== attachEpoch) return
-
-        await detachStream()
-        conversationIdRef.current = view.conversationId as ReturnType<
-          typeof crypto.randomUUID
-        >
+    let tabId: number | undefined
+    let latestViews:
+      | Awaited<ReturnType<typeof conversationPanelViewsStorage.getValue>>
+      | undefined
+    const attachment = new PanelConversationAttachment({
+      load: async (id, signal) =>
+        fetchConversationRunState(
+          agentUrlRef.current ?? (await resolveAgentServerUrl()),
+          id,
+          fetch,
+          AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+        ),
+      ownsLocalStream: (id, runId) => {
+        if (localStreamConversationRef.current !== id) return false
+        localStreamRunRef.current ??= runId
+        return localStreamRunRef.current === runId
+      },
+      attach: async (state, isCurrent) => {
+        await detachView()
+        if (!isCurrent()) return
+        const id = state.conversationId as ReturnType<typeof crypto.randomUUID>
+        conversationIdRef.current = id
         messagesRef.current = state.messages
-        setConversationId(
-          view.conversationId as ReturnType<typeof crypto.randomUUID>,
-        )
+        setConversationId(id)
         setMessages(state.messages)
-        setSearchParams({}, { replace: true })
-        if (state.status === 'running') await resumeStream()
-      } catch (error) {
-        if (cancelled || epoch !== attachEpoch) return
-        attachedPanelRunRef.current = ''
-        sentry.captureException(error, {
-          extra: {
-            conversationId: view.conversationId,
-            operation: 'attach-panel-conversation',
-          },
+        setSearchParamsRef.current({}, { replace: true })
+        if (state.status === 'running') {
+          streamRequestRef.current = resumeStream({
+            body: {
+              conversationId: state.conversationId,
+              runId: state.runId,
+            },
+          })
+        }
+      },
+      clear: (id) => {
+        if (conversationIdRef.current !== id) return
+        const nextId = crypto.randomUUID()
+        conversationIdRef.current = nextId
+        viewTransitionRef.current = detachView().then(() => {
+          if (conversationIdRef.current !== nextId) return
+          messagesRef.current = []
+          setMessages([])
+          setConversationId(nextId)
         })
-      }
-    }
-
-    const refreshForActiveTab = async () => {
-      const [tab] = await chrome.tabs.query({
-        active: true,
-        currentWindow: true,
-      })
-      if (cancelled || tab?.id === undefined) return
-      panelTabId = tab.id
-      panelWindowId = tab.windowId
-      await attachForViews(await conversationPanelViewsStorage.getValue())
-    }
-
-    const unwatch = conversationPanelViewsStorage.watch((views) => {
-      void attachForViews(views)
+      },
+      reportError: (error) =>
+        sentry.captureException(error, {
+          extra: { operation: 'attach-panel-conversation' },
+        }),
     })
-    const onActivated = (activeInfo: { tabId: number; windowId: number }) => {
-      if (
-        panelWindowId !== undefined &&
-        activeInfo.windowId !== panelWindowId
-      ) {
-        return
-      }
-      panelTabId = activeInfo.tabId
-      void conversationPanelViewsStorage.getValue().then(attachForViews)
-    }
-    chrome.tabs.onActivated.addListener(onActivated)
-    void refreshForActiveTab()
-
+    attachmentRef.current = attachment
+    const unwatch = conversationPanelViewsStorage.watch((views) => {
+      latestViews = views
+      if (tabId !== undefined)
+        attachment.update(conversationForTab(views, tabId))
+    })
+    void (async () => {
+      panelTabRef.current ??= resolvePanelTabId()
+      tabId = await panelTabRef.current
+      const views = await conversationPanelViewsStorage.getValue()
+      if (!cancelled)
+        attachment.update(conversationForTab(latestViews ?? views, tabId))
+    })().catch((error) => sentry.captureException(error))
     return () => {
       cancelled = true
-      attachEpoch += 1
+      attachment.dispose()
+      if (attachmentRef.current === attachment)
+        attachmentRef.current = undefined
       unwatch()
-      chrome.tabs.onActivated.removeListener(onActivated)
+      void detachView()
     }
-  }, [detachStream, resumeStream, setMessages, setSearchParams])
+  }, [detachView, resumeStream, setMessages])
 
   // Two cleanups once a turn is no longer streaming: drop messages with
   // empty parts (interrupted responses trip AI SDK validation on the next
@@ -620,112 +670,77 @@ export const useChatSession = (options?: ChatSessionOptions) => {
     if (cleaned !== messages) setMessages(cleaned)
   }, [messages, status, setMessages])
 
-  const {
-    data: remoteConversationData,
-    isFetched: isRemoteConversationFetched,
-  } = useGraphqlQuery(
-    GetConversationWithMessagesDocument,
-    { conversationId: conversationIdParam ?? '' },
-    {
-      enabled: !!conversationIdParam && isLoggedIn,
-    },
-  )
-
-  const [restoredConversationId, setRestoredConversationId] = useState<
-    string | null
-  >(null)
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: restore should only run when query data arrives or conversationIdParam changes
+  // The URL is retained in new tabs for refresh/back navigation. Its keyed
+  // provider isolates each selection; sidepanel keeps its existing transient URL.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: target selection changes during restore; only restart for route/load/retry changes
   useEffect(() => {
     if (!conversationIdParam) return
     if (restoredConversationId === conversationIdParam) return
 
-    if (isLoggedIn) {
-      if (!isRemoteConversationFetched) return
-
-      if (remoteConversationData?.conversation) {
-        const restoredMessages =
-          remoteConversationData.conversation.conversationMessages.nodes
-            .filter((node): node is NonNullable<typeof node> => node !== null)
-            .map((node) => node.message as UIMessage)
-
-        setConversationId(
-          conversationIdParam as ReturnType<typeof crypto.randomUUID>,
-        )
-        setMessages(restoredMessages)
-      }
-      setRestoredConversationId(conversationIdParam)
-      setSearchParams({}, { replace: true })
-      return
-    }
-
+    if (isLoadingProviders || isLoadingAgentUrl) return
     let cancelled = false
+    setRestoreError(null)
     void restoreServerConversation({
       conversationId: conversationIdParam,
-      fetchConversation: fetchServerConversation,
-      isCancelled: () => cancelled,
-      onRestore: (conversation) => {
-        setConversationId(
-          conversation.id as ReturnType<typeof crypto.randomUUID>,
-        )
-        setMessages(conversation.messages)
+      fetchConversation: async (id) => {
+        await detachView()
+        return fetchServerConversation(id)
       },
-      onError: (error) =>
+      isCancelled: () => cancelled,
+      onRestore: async (conversation) => {
+        // Select before enabling the composer. ACP sessions are keyed by both
+        // conversation and agent, so a different agent would lose their context.
+        const target = resolveRestoredChatTarget(
+          conversation,
+          chatTargets,
+          selectedChatTargetRef.current,
+        )
+        if (
+          options?.origin === 'newtab' &&
+          target &&
+          (target.id !== selectedChatTargetRef.current?.id ||
+            target.kind !== selectedChatTargetRef.current?.kind)
+        ) {
+          await selectChatTarget(target)
+        }
+        if (cancelled) return
+        const id = conversation.id as ReturnType<typeof crypto.randomUUID>
+        conversationIdRef.current = id
+        messagesRef.current = conversation.messages
+        setConversationId(id)
+        setMessages(conversation.messages)
+        if (options?.origin === 'newtab' && !target)
+          setRestoreError(
+            'The agent used for this conversation is no longer available. Restore it in Settings to continue.',
+          )
+      },
+      onMissing: () => {
+        if (options?.origin === 'newtab')
+          setRestoreError(
+            'This conversation is no longer available. Choose another conversation or start a new one.',
+          )
+      },
+      onError: (error) => {
+        if (options?.origin === 'newtab')
+          setRestoreError('Couldn’t open this conversation. Please try again.')
         sentry.captureException(error, {
           extra: { conversationId: conversationIdParam },
-        }),
+        })
+      },
       onSettled: () => {
         setRestoredConversationId(conversationIdParam)
-        setSearchParams({}, { replace: true })
+        if (options?.origin !== 'newtab') setSearchParams({}, { replace: true })
       },
     })
     return () => {
       cancelled = true
     }
-  }, [conversationIdParam, remoteConversationData, isLoggedIn])
-
-  // Per-window scope: resume this window's conversation when the panel
-  // (re)mounts (e.g. closed + reopened) instead of starting a blank chat.
-  // No-op in per-tab scope. Tab switches keep the same panel instance, so this
-  // only matters for a fresh mount.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only; reads refs
-  useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      if (!(await sidePanelPerWindowStorage.getValue())) return
-      const [tab] = await chrome.tabs.query({
-        active: true,
-        currentWindow: true,
-      })
-      const windowId = tab?.windowId
-      if (windowId == null || cancelled) return
-      windowIdRef.current = windowId
-      // A live server presence mapping is newer than the window's last manual
-      // conversation. The broker attachment effect above will restore it.
-      const panelViews = await conversationPanelViewsStorage.getValue()
-      if (conversationForTab(panelViews, tab.id)) return
-      const stored = await getWindowConversation(windowId)
-      if (cancelled) return
-      if (stored && stored !== conversationIdRef.current) {
-        setSearchParams({ conversationId: stored })
-      } else if (!stored) {
-        await setWindowConversation(windowId, conversationIdRef.current)
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  // Remember the conversation this window is on so a remount can resume it.
-  useEffect(() => {
-    const windowId = windowIdRef.current
-    if (windowId == null) return
-    ;(async () => {
-      if (!(await sidePanelPerWindowStorage.getValue())) return
-      await setWindowConversation(windowId, conversationId)
-    })()
-  }, [conversationId])
+  }, [
+    conversationIdParam,
+    isLoadingProviders,
+    isLoadingAgentUrl,
+    restoreAttempt,
+  ])
 
   // Keep messagesRef in sync on every change (cheap ref assignment)
   useEffect(() => {
@@ -763,8 +778,10 @@ export const useChatSession = (options?: ChatSessionOptions) => {
 
     // The local server persists every turn during /chat, so the client has no
     // history write of its own left. Incognito still writes nowhere (#1189).
-
-    invalidateCredits()
+    if (persistHistory)
+      void queryClient.invalidateQueries({
+        queryKey: [SERVER_CONVERSATIONS_QUERY_KEY],
+      })
   }, [status])
 
   // Save the in-flight conversation before it can be lost: on page hide (full
@@ -773,17 +790,22 @@ export const useChatSession = (options?: ChatSessionOptions) => {
   // interrupted cloud upload. The local server persists each turn during
   // /chat, so there is nothing left to buffer.
 
-  useEffect(() => {
-    if (chatError) invalidateCredits()
-  }, [chatError, invalidateCredits])
-
   const isIntegrationsSynced = options?.isIntegrationsSynced ?? true
   const isIntegrationsSyncedRef = useRef(isIntegrationsSynced)
-  const pendingMessageRef = useRef<{
-    text: string
-    action?: ChatAction
-    files?: FileUIPart[]
-  } | null>(null)
+  /**
+   * Sends held while something was still loading, in the order they were made.
+   *
+   * A list rather than one slot. A send that lands here clears the composer,
+   * so a second one during the same wait used to replace the first and the
+   * first was never dispatched: the user watched their message disappear.
+   */
+  const pendingMessagesRef = useRef<
+    Array<{
+      text: string
+      action?: ChatAction
+      files?: FileUIPart[]
+    }>
+  >([])
 
   const trackMessageSent = useCallback(() => {
     const target = selectedChatTargetRef.current
@@ -805,26 +827,67 @@ export const useChatSession = (options?: ChatSessionOptions) => {
     })
   }, [mode, selectedChatTargetRef, selectedLlmProvider])
 
+  // Both Send and Retry own POST streams. Adopt their assignment once without
+  // interrupting the request; later runs from another panel still hydrate.
+  const runLocalRequest = useCallback((request: () => Promise<void>) => {
+    const id = conversationIdRef.current
+    return viewTransitionRef.current.then(async () => {
+      if (conversationIdRef.current !== id) return
+      localStreamConversationRef.current = id
+      localStreamRunRef.current = undefined
+      attachmentRef.current?.beginLocalTurn(id)
+      const pending = request()
+      streamRequestRef.current = pending
+      try {
+        await pending
+      } finally {
+        if (streamRequestRef.current === pending)
+          localStreamConversationRef.current = undefined
+      }
+    })
+  }, [])
+
   const dispatchMessage = useCallback(
     (text: string, files?: FileUIPart[]) => {
-      trackMessageSent()
-      startExecutionTask({
-        conversationId: conversationIdRef.current,
-        promptText: text,
-      })
-      baseSendMessage({ text, files })
+      // Returns the turn's promise so a caller sending several can wait for
+      // each before starting the next.
+      return runLocalRequest(() => {
+        trackMessageSent()
+        startExecutionTask({
+          conversationId: conversationIdRef.current,
+          promptText: text,
+        })
+        return baseSendMessage({ text, files })
+      }).catch((error) => sentry.captureException(error))
     },
-    [baseSendMessage, startExecutionTask, trackMessageSent],
+    [baseSendMessage, runLocalRequest, startExecutionTask, trackMessageSent],
   )
 
   useEffect(() => {
     isIntegrationsSyncedRef.current = isIntegrationsSynced
   }, [isIntegrationsSynced])
 
+  // Flushes what `sendMessage` held while something was still loading. It waits
+  // on the target lists too: a queued message dispatched before they settle
+  // would name no provider and come back as a server-side rejection.
   useEffect(() => {
-    if (isIntegrationsSynced && agentServerUrl && pendingMessageRef.current) {
-      const pending = pendingMessageRef.current
-      pendingMessageRef.current = null
+    if (!isSettled || pendingMessagesRef.current.length === 0) return
+
+    if (!hasAnyTarget) {
+      // The wait resolved to nothing connected. Say so, and keep the messages:
+      // connecting a provider re-runs this and sends them, so a handoff whose
+      // query parameters are already gone is not lost.
+      setSendAttemptBlocked(true)
+      return
+    }
+
+    if (!isIntegrationsSynced || !agentServerUrl) return
+
+    // Taken before the first await so a re-run cannot dispatch them twice.
+    const queued = pendingMessagesRef.current
+    pendingMessagesRef.current = []
+
+    void drainPendingSends(queued, (pending) => {
       const { action } = pending
       if (action) {
         setTextToAction((prev) => {
@@ -833,18 +896,48 @@ export const useChatSession = (options?: ChatSessionOptions) => {
           return next
         })
       }
-      dispatchMessage(pending.text, pending.files)
-    }
-  }, [agentServerUrl, dispatchMessage, isIntegrationsSynced])
+      return dispatchMessage(pending.text, pending.files)
+    })
+  }, [
+    agentServerUrl,
+    dispatchMessage,
+    hasAnyTarget,
+    isIntegrationsSynced,
+    isSettled,
+  ])
 
+  /**
+   * Sends, or reports why it did not.
+   *
+   * The boolean matters: callers clear the composer after this returns, so a
+   * refusal that looked like a send would take the user's draft with it. Every
+   * chat surface funnels through here, so the no-provider guard only has to
+   * exist once.
+   */
   const sendMessage = (params: {
     text: string
     action?: ChatAction
     files?: FileUIPart[]
-  }) => {
-    if (!isIntegrationsSyncedRef.current || !agentUrlRef.current) {
-      pendingMessageRef.current = params
-      return
+  }): boolean => {
+    const decision = decideChatSend({
+      isRestoring: isRestoringConversation,
+      hasRestoreError: Boolean(restoreError),
+      isSettled: isSettledRef.current,
+      hasAnyTarget: hasAnyTargetRef.current,
+      isIntegrationsSynced: isIntegrationsSyncedRef.current,
+      hasAgentUrl: Boolean(agentUrlRef.current),
+    })
+
+    if (decision === 'drop') return false
+    if (decision === 'refuse') {
+      setSendAttemptBlocked(true)
+      return false
+    }
+    if (decision === 'queue') {
+      // Retained, not refused: it still reaches the model once the wait is
+      // over, so the caller is right to clear the composer.
+      pendingMessagesRef.current.push(params)
+      return true
     }
 
     if (params.action) {
@@ -856,6 +949,7 @@ export const useChatSession = (options?: ChatSessionOptions) => {
       })
     }
     dispatchMessage(params.text, params.files)
+    return true
   }
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: only need to run this once
@@ -902,15 +996,23 @@ export const useChatSession = (options?: ChatSessionOptions) => {
 
   const resetConversationState = () => {
     const previousConversationId = conversationIdRef.current
-    stop()
-    void finishExecutionTask({ isAbort: true })
+    attachmentRef.current?.retire(previousConversationId)
+    pendingMessagesRef.current = []
+    localStreamConversationRef.current = undefined
     discardServerSession(previousConversationId)
-    setConversationId(crypto.randomUUID())
-    setMessages([])
+    const nextId = crypto.randomUUID()
+    conversationIdRef.current = nextId
+    viewTransitionRef.current = detachView().then(() => {
+      if (conversationIdRef.current !== nextId) return
+      messagesRef.current = []
+      setConversationId(nextId)
+      setMessages([])
+    })
     setTextToAction(new Map())
     setLiked({})
     setDisliked({})
     setRestoredConversationId(null)
+    setRestoreError(null)
     // Clearing the restore param also cancels any in-flight logged-out restore
     // (via the restore effect's cleanup), so a stale response can't revive the
     // old conversation over this new blank session.
@@ -968,9 +1070,6 @@ export const useChatSession = (options?: ChatSessionOptions) => {
     resetConversationState()
   }
 
-  const isRestoringConversation =
-    !!conversationIdParam && restoredConversationId !== conversationIdParam
-
   return {
     mode,
     setMode,
@@ -981,13 +1080,21 @@ export const useChatSession = (options?: ChatSessionOptions) => {
     providers,
     selectedProvider,
     isLoading: isLoadingProviders || isLoadingAgentUrl,
+    hasAnyTarget,
+    isSettled,
+    sendBlocked,
     canSend,
     isSyncing: !isIntegrationsSynced,
     isIncognito,
     isRestoringConversation,
+    restoreError,
+    retryRestoreConversation: () => {
+      setRestoredConversationId(null)
+      setRestoreAttempt((value) => value + 1)
+    },
     agentUrlError,
     chatError,
-    retryLastTurn: regenerate,
+    retryLastTurn: () => runLocalRequest(() => regenerate()),
     handleSelectProvider,
     getActionForMessage,
     resetConversation,

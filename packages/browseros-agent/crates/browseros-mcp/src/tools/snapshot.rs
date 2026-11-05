@@ -81,15 +81,16 @@ fn handler<'a>(
             return Ok(Some(result));
         }
         let snapshot = ctx
-            .session
+            .browser
             .observe(PageId(args.page))
-            .await
+            .await?
             .snapshot_with_options(SnapshotOptions {
                 mode: args.mode.into(),
                 depth,
             })
             .await?;
-        let formatted = format_snapshot_result(&snapshot.text, &snapshot.url, ctx).await;
+        let formatted =
+            format_snapshot_result(&snapshot.text, &snapshot.coverage, &snapshot.url, ctx).await;
         let mut structured = formatted.structured;
         if let Value::Object(object) = &mut structured {
             object.insert("page".to_string(), json!(args.page));

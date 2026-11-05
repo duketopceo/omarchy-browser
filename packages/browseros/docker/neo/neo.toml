@@ -1,0 +1,43 @@
+# BrowserOS neo server behaviour, read at startup through BROWSERCLAW_CONFIG_FILE.
+#
+# Every key is optional. A commented-out key keeps the default for the server's
+# mode (BROWSERCLAW_HOSTED_MODE); the values shown are the hosted defaults.
+# A key or value the server does not know keeps its default and is reported
+# as a warning in `docker logs`; a file that is not valid TOML stops it. A
+# claw-server at 0.0.84 or earlier stops on any key it does not know instead,
+# so keep a key commented unless the image's claw-server has it.
+#
+# To change them, replace this file: mount your own over it with
+#   docker run -v ./neo.toml:/etc/neo/neo.toml:ro ...
+# or COPY one to /etc/neo/neo.toml in an image built FROM neo.
+
+[tabs]
+# Who decides which tab group an agent's page joins.
+#   "explicit"  A page joins a group only when the agent's call passes groupId.
+#               Neo never creates, titles, collapses or closes a group itself.
+#   "auto"      Neo keeps each task's pages in a <client>/<task> group that it
+#               titles, collapses and closes. The desktop app's behaviour.
+# grouping = "explicit"
+
+# How long to keep finished sessions' tabs before automatic cleanup, in positive
+# whole minutes. Starts when the session ends, including after idle expiry; it
+# does not count from when a tab opens. The desktop default is 60 minutes.
+# Applies with either grouping mode. Automatic groups use the same grace period;
+# individual-tab cleanup skips tabs that are active or still have a live owner.
+# close_after_minutes = 30
+
+# [scripts]
+# Whether BrowserOS's own page scripts that only touch the DOM (settle probes,
+# the agent pointer, element geometry, screenshot overlays) run in an isolated
+# JavaScript world the page cannot see. false runs them in the page's own
+# world. Needs a claw-server newer than 0.0.84.
+# isolated_world = true
+
+# [run]
+# Default and maximum wall-clock budget for one run, in positive whole seconds.
+# Includes JavaScript execution, browser calls and waits. A caller's timeout (ms)
+# may shorten this budget; a larger value is rejected before the script starts.
+# Saved flows use the same budget with time reserved for their handback.
+# Restart Neo after changing this. The MCP client/proxy timeout must allow extra
+# time for request admission and output publication (for example, 90s for 60s).
+# wall_timeout_seconds = 60

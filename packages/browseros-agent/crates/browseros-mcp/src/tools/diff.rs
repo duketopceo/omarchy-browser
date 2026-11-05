@@ -1,5 +1,5 @@
 use crate::{
-    format::diff::format_diff_result,
+    format::diff::{DiffDetail, format_diff_result},
     framework::{
         ToolCtx, ToolExecResult, ToolResult, parse_args, pending_dialog_result, text_result,
     },
@@ -39,19 +39,18 @@ fn handler<'a>(
         if let Some(result) = pending_dialog_result(ctx, PageId(args.page)) {
             return Ok(Some(result));
         }
-        let diff = ctx.session.observe(PageId(args.page)).await.diff().await?;
+        let diff = ctx.browser.observe(PageId(args.page)).await?.diff().await?;
         let origin = diff.after_url.as_deref().map(ToString::to_string);
         let origin = match origin {
             Some(origin) => origin,
             None => ctx
-                .session
-                .pages
-                .get_info(PageId(args.page))
-                .await
+                .browser
+                .refresh_page(PageId(args.page))
+                .await?
                 .map(|info| info.url)
                 .unwrap_or_else(|| "unknown".to_string()),
         };
-        let formatted = format_diff_result(&diff, &origin, ctx).await;
+        let formatted = format_diff_result(&diff, &origin, ctx, DiffDetail::Full).await;
         Ok(Some(text_result(
             formatted.text,
             Some(formatted.structured),

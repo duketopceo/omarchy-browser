@@ -19,12 +19,8 @@ mock.module('./client', () => ({
     }),
 }))
 
-const {
-  sessionPreviewUrl,
-  taskScreenshotUrl,
-  useLiveSessions,
-  useSessionScreenshots,
-} = await import('./audit.hooks')
+const { taskScreenshotUrl, useLiveSessions, useSessionScreenshots } =
+  await import('./audit.hooks')
 
 afterAll(() => mock.restore())
 
@@ -34,12 +30,7 @@ beforeEach(() => {
 })
 
 describe('session visual resources', () => {
-  it('builds live and historical URLs from session-owned identities', () => {
-    expect(
-      sessionPreviewUrl('session / one', 456, 'http://127.0.0.1:9200'),
-    ).toBe(
-      'http://127.0.0.1:9200/api/v1/sessions/session%20%2F%20one/preview?refresh=456',
-    )
+  it('builds screenshot URLs from session-owned identities', () => {
     expect(
       taskScreenshotUrl('session / one', 17, 'http://127.0.0.1:9200'),
     ).toBe(
@@ -47,16 +38,17 @@ describe('session visual resources', () => {
     )
   })
 
-  it('polls ordered screenshot metadata by session', async () => {
+  it('exposes ordered screenshot metadata by session, polling opt-in', async () => {
     expect(Array.from(useSessionScreenshots.getKey())).toEqual([
       'api',
       'session',
       'screenshots',
     ])
+    // No factory-level polling: callers opt in only while the session is live.
     expect(
       useSessionScreenshots.getOptions({ sessionId: 'session-1' })
         .refetchInterval,
-    ).toBe(3000)
+    ).toBeUndefined()
     expect(
       await useSessionScreenshots.fetcher({ sessionId: 'session-1' }),
     ).toBe(screenshotResponse)
@@ -67,14 +59,17 @@ describe('session visual resources', () => {
 })
 
 describe('useLiveSessions', () => {
-  it('polls a dedicated complete live-session snapshot', async () => {
+  it('exposes a dedicated complete live-session snapshot, polling opt-in', async () => {
     expect(Array.from(useLiveSessions.getKey())).toEqual([
       'api',
       'sessions',
       'live',
     ])
-    expect(useLiveSessions.getOptions().refetchInterval).toBe(1500)
-    expect(useLiveSessions.getOptions().refetchIntervalInBackground).toBe(true)
+    // No factory-level polling: cockpit.data.ts opts in to the interval.
+    expect(useLiveSessions.getOptions().refetchInterval).toBeUndefined()
+    expect(
+      useLiveSessions.getOptions().refetchIntervalInBackground,
+    ).toBeUndefined()
 
     expect(await useLiveSessions.fetcher(undefined)).toBe(response)
     expect(listSessions).toHaveBeenCalledWith({ status: 'live' })

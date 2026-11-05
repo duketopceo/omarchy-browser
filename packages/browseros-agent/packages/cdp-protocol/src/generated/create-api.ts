@@ -28,10 +28,13 @@ function createDomainProxy(domain: string, send: RawSend, on: RawOn): unknown {
 export function createProtocolApi(send: RawSend, on: RawOn): ProtocolApi {
   return {
     Accessibility: createDomainProxy('Accessibility', send, on),
+    Ads: createDomainProxy('Ads', send, on),
     Animation: createDomainProxy('Animation', send, on),
     Audits: createDomainProxy('Audits', send, on),
     Autofill: createDomainProxy('Autofill', send, on),
     Bookmarks: createDomainProxy('Bookmarks', send, on),
+    Passwords: createDomainProxy('Passwords', send, on),
+    Payments: createDomainProxy('Payments', send, on),
     BackgroundService: createDomainProxy('BackgroundService', send, on),
     BluetoothEmulation: createDomainProxy('BluetoothEmulation', send, on),
     Browser: createDomainProxy('Browser', send, on),
@@ -45,6 +48,7 @@ export function createProtocolApi(send: RawSend, on: RawOn): ProtocolApi {
     DOMStorage: createDomainProxy('DOMStorage', send, on),
     DeviceAccess: createDomainProxy('DeviceAccess', send, on),
     DeviceOrientation: createDomainProxy('DeviceOrientation', send, on),
+    DigitalCredentials: createDomainProxy('DigitalCredentials', send, on),
     Emulation: createDomainProxy('Emulation', send, on),
     EventBreakpoints: createDomainProxy('EventBreakpoints', send, on),
     Extensions: createDomainProxy('Extensions', send, on),

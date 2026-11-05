@@ -37,42 +37,31 @@ describe('dbProviderStore', () => {
     initializeDb({ dbPath: join(dir, 'db', 'browseros.sqlite') })
   }
 
-  test('insertIfAbsent writes a provider that is not there yet', async () => {
-    useTempDb()
-
-    const saved = await dbProviderStore.insertIfAbsent(baseProvider())
-
-    expect(saved?.id).toBe(PROVIDER_ID)
-    expect(saved?.apiKey).toBe('sk-test')
-    expect(await dbProviderStore.list()).toHaveLength(1)
-  })
-
-  // The behaviour the whole import design rests on: onConflictDoNothing must
-  // return no row, and must leave the existing one exactly as it was.
-  test('insertIfAbsent returns null and changes nothing when the id exists', async () => {
-    useTempDb()
-    await dbProviderStore.upsert({ ...baseProvider(), name: 'Edited since' })
-
-    const saved = await dbProviderStore.insertIfAbsent({
-      ...baseProvider(),
-      name: 'Stale copy',
-      apiKey: 'sk-stale',
-    })
-
-    expect(saved).toBeNull()
-    const existing = await dbProviderStore.get(PROVIDER_ID)
-    expect(existing?.name).toBe('Edited since')
-    // The credential is checked through the credentialed read: the ordinary
-    // one no longer returns it.
+  test('persists header templates across reopen, edits, and explicit removal', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'browseros-providers-test-'))
+    tempDirs.push(dir)
+    const options = { dbPath: join(dir, 'browseros.sqlite') }
+    initializeDb(options)
+    const headers = {
+      'x-opencode-session': '{{conversationId}}',
+      'x-test': 'value',
+    }
+    await dbProviderStore.upsert({ ...baseProvider(), headers })
+    closeDb()
+    initializeDb(options)
+    expect((await dbProviderStore.get(PROVIDER_ID))?.headers).toEqual(headers)
+    await dbProviderStore.upsert({ ...baseProvider(), name: 'Renamed' })
     expect(
-      (await dbProviderStore.getWithCredentials(PROVIDER_ID))?.apiKey,
-    ).toBe('sk-test')
+      (await dbProviderStore.getWithCredentials(PROVIDER_ID))?.headers,
+    ).toEqual(headers)
+    await dbProviderStore.upsert({ ...baseProvider(), headers: {} })
+    expect((await dbProviderStore.get(PROVIDER_ID))?.headers).toEqual({})
   })
 
   // Integer would floor this to 0 and silently make every model deterministic.
   test('temperature survives as a fraction', async () => {
     useTempDb()
-    await dbProviderStore.insertIfAbsent({
+    await dbProviderStore.upsert({
       ...baseProvider(),
       temperature: 0.2,
     })
@@ -80,9 +69,9 @@ describe('dbProviderStore', () => {
     expect((await dbProviderStore.get(PROVIDER_ID))?.temperature).toBe(0.2)
   })
 
-  test('insertIfAbsent preserves the creation time it is given', async () => {
+  test('upsert preserves the creation time it is given', async () => {
     useTempDb()
-    await dbProviderStore.insertIfAbsent({
+    await dbProviderStore.upsert({
       ...baseProvider(),
       createdAt: 42,
     })

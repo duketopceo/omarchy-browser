@@ -3,6 +3,7 @@ import type { SessionBrowserTab } from '@browseros/claw-api'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { parseHTML } from 'linkedom'
 import { act, type ComponentProps, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import type { Root } from 'react-dom/client'
 import * as _popover from '@/components/ui/popover'
 import * as _auditHooks from '@/modules/api/audit.hooks'
@@ -16,8 +17,7 @@ const invalidatedQueryKeys: unknown[] = []
 
 mock.module('@/modules/api/audit.hooks', () => ({
   ..._auditHooks,
-  useSessionPreviewUrl: () => null,
-  // Null base keeps LivePreview from opening a real EventSource under linkedom.
+  // Null base keeps screenshot cards from making real requests under linkedom.
   useApiBaseUrl: () => null,
 }))
 
@@ -45,13 +45,22 @@ mock.module('@/modules/api/focus.hooks', () => ({
   }),
 }))
 
+// Keep the tab list always open, portalled to the body as the real one is.
 mock.module('@/components/ui/popover', () => ({
   ..._popover,
   Popover: ({ children }: { children?: ReactNode }) => <>{children}</>,
   PopoverTrigger: (props: ComponentProps<'button'>) => <button {...props} />,
-  PopoverContent: (props: ComponentProps<'div'>) => (
-    <div data-slot="popover-content" {...props} />
-  ),
+  PopoverContent: ({
+    align: _align,
+    alignOffset: _alignOffset,
+    sideOffset: _sideOffset,
+    ...props
+  }: ComponentProps<'div'> & {
+    align?: string
+    alignOffset?: number
+    sideOffset?: number
+  }) =>
+    createPortal(<div data-slot="popover-content" {...props} />, document.body),
 }))
 
 const globalDescriptors = new Map(
@@ -84,9 +93,9 @@ function session(
     sessionId: 'session-live',
     profileId: 'profile-shared',
     slug: 'codex',
+    agentName: 'Codex',
     label: 'Codex',
     name: 'Research BrowserClaw',
-    harness: 'Codex',
     color: '#0254ec',
     startedAt: 100,
     state: 'active',
@@ -162,17 +171,10 @@ async function render(sessions: LiveSessionCardRecord[]) {
 }
 
 describe('RunningGrid', () => {
-  it('hides the Running now section when no live sessions are connected', async () => {
+  it('shows nothing while no agent is working', async () => {
     await render([])
-    expect(container.textContent).not.toContain('Running now')
-    expect(container.textContent).not.toContain('0 live')
-  })
 
-  it('uses the Audit hover blue caption tone', async () => {
-    await render([session()])
-
-    const card = container.querySelector('[data-session-card="session-live"]')
-    expect(card?.querySelector('[data-caption-tone="blue"]')).not.toBeNull()
+    expect(container.innerHTML).toBe('')
   })
 
   it('renders and cancels two same-profile sessions by distinct session ids', async () => {
@@ -201,62 +203,21 @@ describe('RunningGrid', () => {
     ])
   })
 
-  it('counts connected sessions, including an idle zero-tab session', async () => {
+  it('says Idle, not Working, once the agent stops making tool calls', async () => {
     await render([
-      session({ sessionId: 'session-active' }),
-      session({
-        sessionId: 'session-idle',
-        state: 'idle',
-        selectedTab: null,
-        browserTabs: [],
-        toolCount: 0,
-        recentTools: [],
-      }),
+      session({ sessionId: 'session-busy' }),
+      session({ sessionId: 'session-quiet', state: 'idle' }),
     ])
 
-    expect(container.textContent).toContain('2 live')
-    const idleCard = container.querySelector(
-      '[data-session-card="session-idle"]',
-    )
-    expect(idleCard?.textContent).toContain('Idle')
-    expect(idleCard?.querySelector('[data-watch-browser-tab]')).toBeNull()
-    expect(idleCard?.querySelector('[data-preview-url]')).toBeNull()
-    expect(
-      idleCard?.querySelector('[data-stop-session="session-idle"]'),
-    ).not.toBeNull()
+    const busy = container.querySelector('[data-session-card="session-busy"]')
+    const quiet = container.querySelector('[data-session-card="session-quiet"]')
+    expect(busy?.textContent).toContain('Working')
+    expect(quiet?.textContent).not.toContain('Working')
+    expect(quiet?.textContent).toContain('Idle')
+    expect(quiet?.textContent).toContain('Last active on Example')
   })
 
-  it('retains multi-tab count and merged tool trail', async () => {
-    const selectedTab = browserTab({
-      browserTabId: 41,
-      recentTools: [{ name: 'navigate', at: 100 }],
-    })
-    await render([
-      session({
-        selectedTab,
-        browserTabs: [selectedTab, browserTab({ browserTabId: 42 })],
-        toolCount: 3,
-        recentTools: [
-          { name: 'navigate', at: 100 },
-          { name: 'snapshot', at: 200 },
-          { name: 'act', at: 300 },
-        ],
-      }),
-    ])
-
-    expect(container.textContent).toContain('2 tabs')
-    expect(container.textContent).toContain('navigate -> snapshot -> act')
-    const trigger = container.querySelector('[data-tab-count="2"]')
-    if (!trigger) throw new Error('tab-count trigger missing')
-    const popover = container.querySelector('[data-slot="popover-content"]')
-    if (!popover) {
-      throw new Error(`tab popover missing: ${document.body.outerHTML}`)
-    }
-    expect(popover.getAttribute('class') ?? '').toContain('ph-no-capture')
-    expect(popover.textContent).toContain('Example')
-  })
-
-  it('watches the exact selected browser tab id', async () => {
+  it('watches the tab the agent is using', async () => {
     const selectedTab = browserTab({ browserTabId: 42 })
     await render([session({ selectedTab, browserTabs: [selectedTab] })])
 
@@ -266,5 +227,61 @@ describe('RunningGrid', () => {
       watch.dispatchEvent(new window.Event('click', { bubbles: true }))
     })
     expect(focusCalls).toEqual([{ browserTabId: 42 }])
+  })
+
+  it('counts the tabs only when the agent has more than one', async () => {
+    const tabs = [
+      browserTab({ browserTabId: 1 }),
+      browserTab({ browserTabId: 2 }),
+      browserTab({ browserTabId: 3 }),
+    ]
+    await render([
+      session({ sessionId: 'one-tab' }),
+      session({ sessionId: 'three-tabs', browserTabs: tabs }),
+    ])
+
+    const count = (sessionId: string) =>
+      container
+        .querySelector(`[data-session-card="${sessionId}"]`)
+        ?.querySelector('[data-tab-count]')
+    expect(count('one-tab')).toBeNull()
+    expect(count('three-tabs')?.textContent).toBe('3 tabs')
+  })
+
+  it('goes to the tab picked from the list', async () => {
+    const tabs = [
+      browserTab({ browserTabId: 1, title: 'Messaging | LinkedIn' }),
+      browserTab({ browserTabId: 2, title: 'Sales Navigator' }),
+    ]
+    await render([session({ browserTabs: tabs })])
+
+    const row = document.querySelector('[data-go-to-browser-tab="2"]')
+    if (!row) throw new Error('Sales Navigator row missing')
+    await act(async () => {
+      row.dispatchEvent(new window.Event('click', { bubbles: true }))
+    })
+    expect(focusCalls).toEqual([{ browserTabId: 2 }])
+  })
+
+  it('names each tab and marks the one on the preview', async () => {
+    const tabs = [
+      browserTab({ browserTabId: 1, title: 'Messaging | LinkedIn' }),
+      browserTab({
+        browserTabId: 2,
+        title: '',
+        url: 'https://news.ycombinator.com/',
+      }),
+    ]
+    await render([session({ browserTabs: tabs })])
+
+    const rows = [...document.querySelectorAll('[data-go-to-browser-tab]')]
+    expect(rows.map((row) => row.getAttribute('aria-label'))).toEqual([
+      'Go to Messaging | LinkedIn',
+      'Go to news.ycombinator.com',
+    ])
+    expect(rows.map((row) => row.getAttribute('aria-current'))).toEqual([
+      'true',
+      null,
+    ])
   })
 })

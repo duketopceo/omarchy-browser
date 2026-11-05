@@ -103,6 +103,34 @@ describe('ClawApiClient', () => {
     )
   })
 
+  it('lists every audit agent from the exact route', async () => {
+    const agents = {
+      items: [
+        {
+          slug: 'claude-code',
+          label: 'Claude Code',
+          taskCount: 42,
+          lastStartedAt: 1_767_225_600_000,
+        },
+      ],
+    }
+    const requests: Request[] = []
+    const client = new ClawApiClient(baseUrl, {
+      fetch: async (input, init) => {
+        const request =
+          input instanceof Request ? input : new Request(input, init)
+        requests.push(request)
+        return Response.json(agents)
+      },
+    })
+
+    await expect(client.listAuditAgents()).resolves.toEqual(agents)
+    expect(requests[0]?.method).toBe('GET')
+    expect(new URL(requests[0]?.url ?? '').pathname).toBe(
+      '/api/v1/audit/agents',
+    )
+  })
+
   it('preserves standard API errors for cockpit stats', async () => {
     const client = new ClawApiClient(baseUrl, {
       fetch: async () =>
@@ -118,6 +146,39 @@ describe('ClawApiClient', () => {
 
     await expect(client.getCockpitStats()).rejects.toBeInstanceOf(
       ApiResponseError,
+    )
+  })
+
+  it('tests that agent settings are read and updated on the exact route', async () => {
+    const requests: Request[] = []
+    const client = new ClawApiClient(baseUrl, {
+      fetch: async (input, init) => {
+        const request =
+          input instanceof Request ? input : new Request(input, init)
+        requests.push(request)
+        return Response.json({
+          humanHelpEnabled: false,
+          taskCleanupTipEnabled: false,
+        })
+      },
+    })
+
+    const settings = {
+      humanHelpEnabled: false,
+      taskCleanupTipEnabled: false,
+    } as const
+    await expect(client.getAgentSettings()).resolves.toEqual(settings)
+    await expect(
+      client.updateAgentSettings({ humanHelpEnabled: false }),
+    ).resolves.toEqual(settings)
+
+    expect(requests.map((request) => request.method)).toEqual(['GET', 'PUT'])
+    for (const request of requests) {
+      expect(new URL(request.url).pathname).toBe('/api/v1/settings/agent')
+    }
+    expect(requests[1]?.headers.get('content-type')).toBe('application/json')
+    await expect(requests[1]?.text()).resolves.toBe(
+      '{"humanHelpEnabled":false}',
     )
   })
 
@@ -178,6 +239,7 @@ describe('ClawApiClient', () => {
     const preview = await client.getSessionPreview({
       sessionId: 'session / one',
       refresh: 456,
+      browserTabId: 102,
     })
     await expect(preview.arrayBuffer()).resolves.toHaveProperty('byteLength', 2)
     await expect(
@@ -222,6 +284,9 @@ describe('ClawApiClient', () => {
     expect(new URL(requests[5]?.url ?? '').searchParams.get('refresh')).toBe(
       '456',
     )
+    expect(
+      new URL(requests[5]?.url ?? '').searchParams.get('browserTabId'),
+    ).toBe('102')
     expect(requests.at(-2)?.method).toBe('PUT')
     expect(requests.at(-1)?.method).toBe('DELETE')
     expect(requests.every((request) => request.credentials === 'omit')).toBe(
@@ -281,7 +346,7 @@ describe('ClawApiClient', () => {
     expect(clone).not.toHaveBeenCalled()
   })
 
-  it('exposes all 18 facade operations', () => {
+  it('exposes all 20 facade operations', () => {
     const client = new ClawApiClient(baseUrl, {
       fetch: async () => Response.json({}),
     })
@@ -304,9 +369,11 @@ describe('ClawApiClient', () => {
       'listConnections',
       'connectHarness',
       'disconnectHarness',
+      'getClaudeDesktopExtension',
+      'installClaudeDesktopExtension',
     ] as const
 
-    expect(methods).toHaveLength(18)
+    expect(methods).toHaveLength(20)
     for (const method of methods) expect(client[method]).toBeFunction()
   })
 })
@@ -322,6 +389,14 @@ describe('binary URL builders', () => {
         refresh: 0,
       }),
     ).toBe(`${baseUrl}/api/v1/sessions/session%20%2F%20one/preview?refresh=0`)
+    expect(
+      buildSessionPreviewUrl(baseUrl, {
+        sessionId: 'session / one',
+        browserTabId: 102,
+      }),
+    ).toBe(
+      `${baseUrl}/api/v1/sessions/session%20%2F%20one/preview?browserTabId=102`,
+    )
     expect(
       buildSessionScreenshotUrl(baseUrl, {
         sessionId: 'session / one',

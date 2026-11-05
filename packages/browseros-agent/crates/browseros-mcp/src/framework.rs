@@ -1,22 +1,58 @@
 //! Tool registry and execution framework for BrowserOS MCP tools.
 
 use crate::{response::ToolResponse, tools};
-use browseros_core::{BrowserSession, CoreError, PageId, WindowId};
+use browseros_core::{
+    BrowserView, CoreError, NativeCapabilities, NativeFeature, PageId, TargetBinding, TargetIntent,
+    WindowId,
+};
 use futures_util::future::BoxFuture;
 use rmcp::model::{CallToolResult, ContentBlock, JsonObject, Tool, ToolAnnotations};
 use schemars::{JsonSchema, generate::SchemaSettings};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use std::{collections::HashSet, path::PathBuf, sync::Arc};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-pub type OutputFileAccess = Arc<Mutex<HashSet<PathBuf>>>;
-pub type ToolHandler = for<'a> fn(
+/// Compatibility name for callers supplying a logical session's output store.
+pub type OutputFileAccess = crate::output_store::OutputStore;
+pub type BrowserToolHandler = for<'a> fn(
     Value,
     &'a ToolCtx,
     &'a mut ToolResponse,
 ) -> BoxFuture<'a, ToolExecResult<Option<ToolResult>>>;
+pub type OutputToolHandler =
+    for<'a> fn(Value, &'a OutputFileAccess) -> BoxFuture<'a, ToolExecResult<ToolResult>>;
+
+/// The handler declares its real dependencies. Output readers cannot accidentally
+/// load a profile, require a browser connection, or start another output collection.
+#[derive(Clone, Copy)]
+pub enum ToolHandler {
+    Browser(BrowserToolHandler),
+    Output(OutputToolHandler),
+}
+
+/// Available execution dependencies at the host seam. Browser calls and nested SDK
+/// calls keep their captured ToolCtx; output-only execution carries no browser view.
+pub enum ToolExecution<'a> {
+    Browser(&'a ToolCtx),
+    Outputs(&'a OutputFileAccess),
+}
+
+impl<'a> From<&'a ToolCtx> for ToolExecution<'a> {
+    fn from(ctx: &'a ToolCtx) -> Self {
+        Self::Browser(ctx)
+    }
+}
+
+impl ToolExecution<'_> {
+    fn output_files(&self) -> &OutputFileAccess {
+        match self {
+            Self::Browser(ctx) => &ctx.output_files,
+            Self::Outputs(outputs) => outputs,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct BrowserToolDefaults {
@@ -32,23 +68,93 @@ pub struct HelperSource {
     pub source: String,
 }
 
+/// Host-owned logical binding for one task. The host persists intent; tools only
+/// resolve native identities and request changes. Existing views never read this
+/// store again, so rebinding affects only subsequently admitted requests.
+pub trait TargetStore: Send + Sync {
+    fn get(&self) -> BoxFuture<'_, Result<Option<TargetBinding>, String>>;
+    /// Saves intent before returning and assigns a monotonically increasing revision.
+    fn set(&self, intent: TargetIntent) -> BoxFuture<'_, Result<TargetBinding, String>>;
+    /// Releases intent without closing windows, unloading profiles, or resetting revisions.
+    fn clear(&self) -> BoxFuture<'_, Result<(), String>>;
+}
+
+/// In-memory task binding for one standalone MCP service. Keeping the revision
+/// beside the optional binding prevents clear/reselect from reusing an old generation.
+#[derive(Default)]
+pub struct StaticTargetStore {
+    state: Mutex<StaticTargetState>,
+}
+
+#[derive(Default)]
+struct StaticTargetState {
+    binding: Option<TargetBinding>,
+    revision: u64,
+}
+
+impl StaticTargetStore {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl TargetStore for StaticTargetStore {
+    fn get(&self) -> BoxFuture<'_, Result<Option<TargetBinding>, String>> {
+        Box::pin(async move { Ok(self.state.lock().await.binding.clone()) })
+    }
+
+    fn set(&self, intent: TargetIntent) -> BoxFuture<'_, Result<TargetBinding, String>> {
+        Box::pin(async move {
+            let mut state = self.state.lock().await;
+            let revision = state
+                .revision
+                .checked_add(1)
+                .ok_or("target revision exhausted")?;
+            let binding = TargetBinding { intent, revision };
+            state.revision = revision;
+            state.binding = Some(binding.clone());
+            Ok(binding)
+        })
+    }
+
+    fn clear(&self) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            let mut state = self.state.lock().await;
+            let revision = state
+                .revision
+                .checked_add(1)
+                .ok_or("target revision exhausted")?;
+            state.revision = revision;
+            state.binding = None;
+            Ok(())
+        })
+    }
+}
+
+/// Browser execution dependencies for one admitted request. Hosts capture the
+/// view before constructing this value; nested tools must reuse it unchanged.
 #[derive(Clone)]
 pub struct BrowserToolOptions {
-    pub session: Arc<BrowserSession>,
+    pub browser: BrowserView,
+    pub target: Option<Arc<dyn TargetStore>>,
     pub defaults: BrowserToolDefaults,
     pub cancel: CancellationToken,
     pub output_files: OutputFileAccess,
-    /// Host hook a script tool invokes around each primitive; `None` outside
-    /// the host (unit tests, non-host callers), which disables the hook.
+    /// Host capabilities for script primitive hooks and central tool-operation
+    /// ordering; `None` disables these additions for non-host callers.
     pub inner_call_hook: Option<Arc<dyn InnerCallHook>>,
     /// Helpers the host loads into the script runtime before the agent's code
     /// runs, exposed as `helpers.<name>`. Empty outside the host.
     pub preloaded_helpers: Vec<HelperSource>,
 }
 
+/// One request's execution view plus host capabilities. Cloning it preserves
+/// capture through scripts, nested tool dispatch, and delayed response work.
 #[derive(Clone)]
 pub struct ToolCtx {
-    pub session: Arc<BrowserSession>,
+    pub browser: BrowserView,
+    pub target: Option<Arc<dyn TargetStore>>,
     pub defaults: BrowserToolDefaults,
     pub cancel: CancellationToken,
     pub output_files: OutputFileAccess,
@@ -56,19 +162,35 @@ pub struct ToolCtx {
     pub inner_call_hook: Option<Arc<dyn InnerCallHook>>,
     /// See [`BrowserToolOptions::preloaded_helpers`].
     pub preloaded_helpers: Vec<HelperSource>,
+    /// Set for calls a `run` script makes. Their results go to the script, not the model, so
+    /// tools hand back the whole value instead of an inline excerpt plus a file the script
+    /// cannot open; what the script returns is capped on its way to the model instead.
+    pub within_script: bool,
+    /// Process-fixed budget captured by this request and all its nested SDK calls.
+    pub run_policy: crate::RunPolicy,
 }
 
 impl ToolCtx {
     #[must_use]
     pub fn new(options: BrowserToolOptions) -> Self {
         Self {
-            session: options.session,
+            browser: options.browser,
+            target: options.target,
             defaults: options.defaults,
             cancel: options.cancel,
             output_files: options.output_files,
             inner_call_hook: options.inner_call_hook,
             preloaded_helpers: options.preloaded_helpers,
+            within_script: false,
+            run_policy: crate::RunPolicy::default(),
         }
+    }
+
+    /// Apply the host's already-resolved budget; the MCP crate never reads deployment files.
+    #[must_use]
+    pub fn with_run_policy(mut self, policy: crate::RunPolicy) -> Self {
+        self.run_policy = policy;
+        self
     }
 
     pub fn throw_if_cancelled(&self) -> ToolExecResult<()> {
@@ -80,12 +202,23 @@ impl ToolCtx {
     }
 }
 
-/// Host-injected hook a script tool (`run`/`execute`) calls around each browser
-/// primitive so the host can enforce per-primitive ownership and record the
-/// primitive as a child audit row. `browseros-mcp` cannot reach the host's
-/// guards or audit store, so the host implements this and passes it in via
-/// [`ToolCtx::inner_call_hook`].
+/// Host capabilities for script ownership/audit and optional tool-operation ordering.
+/// The script bridge records each primitive; the central executor retains a host guard
+/// only for operations the host selects. `browseros-mcp` cannot reach the host's guards
+/// or audit store, so the host supplies this through [`ToolCtx::inner_call_hook`].
 pub trait InnerCallHook: Send + Sync {
+    /// Marks password- or card-bearing script input before authorization or
+    /// dispatch can fail. Hosts suppress parent source/audit previews even after
+    /// cancellation.
+    fn mark_sensitive_input(&self) {}
+
+    /// Holds `page` out of host screenshots before a primitive fills a card
+    /// into it. Called before dispatch, so a capture during the fill or a
+    /// cancelled run never leaves the filled number unguarded.
+    fn hold_card_data<'a>(&'a self, _page: u32) -> BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
     /// Authorize a primitive about to run against the caller's ownership.
     /// `page` is the primitive's target page id, when it addresses one.
     /// `Err(reason)` rejects the primitive and the reason is surfaced to the
@@ -94,6 +227,20 @@ pub trait InnerCallHook: Send + Sync {
 
     /// Record a completed inner primitive as a child audit row.
     fn record<'a>(&'a self, record: InnerCallRecord<'a>) -> BoxFuture<'a, ()>;
+
+    /// Optionally order a tool operation with other host work. `execute_tool`
+    /// passes the plain catalog name and raw arguments, then retains the owned
+    /// guard through handler/readback work and releases it before bridge audit.
+    /// Acquisition may be dropped on cancellation or a caller's timeout; it
+    /// must not detach queued work. The captured BrowserView still governs access.
+    fn acquire_tool_guard<'a>(
+        &'a self,
+        tool_name: &'a str,
+        args: &'a Value,
+    ) -> BoxFuture<'a, Result<Option<Box<dyn Send>>, String>> {
+        let _ = (tool_name, args);
+        Box::pin(async { Ok(None) })
+    }
 
     /// Signal that the script just created a page. The host claims and groups
     /// it exactly as a `tabs new` would, so a script's tabs get the agent's
@@ -156,6 +303,8 @@ pub struct InnerCallRecord<'a> {
     pub from_helper: bool,
     /// Whether the primitive failed.
     pub is_error: bool,
+    /// Safe presentation state only; never pass native handles or file paths to the audit.
+    pub file_chooser_open: bool,
     /// Wall-clock duration of the primitive in milliseconds.
     pub duration_ms: i64,
     /// Estimated output tokens of the primitive's result payload (v1 estimator),
@@ -172,13 +321,51 @@ pub struct ToolDef {
     pub output_schema: Option<Arc<JsonObject>>,
     pub annotations: Option<ToolAnnotations>,
     pub metadata: ToolMetadata,
+    /// Documentation that only applies when the native browser has a feature. It is appended
+    /// to `description` for capable browsers and omitted otherwise, so an older browser's
+    /// tool list never teaches a surface it cannot use.
+    pub feature_note: Option<FeatureNote>,
     pub handler: ToolHandler,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FeatureNote {
+    pub feature: NativeFeature,
+    pub text: &'static str,
 }
 
 impl ToolDef {
     #[must_use]
-    pub fn to_mcp_tool(&self) -> Tool {
-        let mut tool = Tool::new(self.name, self.description, self.input_schema.clone());
+    pub fn requires_browser(&self) -> bool {
+        matches!(self.handler, ToolHandler::Browser(_))
+    }
+    /// Whether discovery should offer this tool for the connected native. Hidden tools stay
+    /// in the catalog (stable `get_tool` schemas for cached clients); `execute_tool` refuses
+    /// them, so a list is a hint and the refusal is the authority.
+    #[must_use]
+    pub fn available(&self, native: NativeCapabilities) -> bool {
+        self.metadata
+            .requires
+            .is_none_or(|feature| native.supports(feature))
+    }
+
+    #[must_use]
+    pub fn description_for(&self, native: NativeCapabilities) -> String {
+        match self.feature_note {
+            Some(note) if native.supports(note.feature) => {
+                format!("{}\n\n{}", self.description, note.text)
+            }
+            _ => self.description.to_string(),
+        }
+    }
+
+    #[must_use]
+    pub fn to_mcp_tool(&self, native: NativeCapabilities) -> Tool {
+        let mut tool = Tool::new(
+            self.name,
+            self.description_for(native),
+            self.input_schema.clone(),
+        );
         if let Some(output_schema) = &self.output_schema {
             tool = tool.with_raw_output_schema(output_schema.clone());
         }
@@ -195,6 +382,34 @@ pub struct ToolMetadata {
     /// uses it for page signals; the claw-server host uses it for pre-dispatch snapshots,
     /// ownership guards, audit records, and tab-activity effects.
     pub accepts_page_arg: bool,
+    /// Management can recover a stale binding and therefore bypasses view admission.
+    pub manages_target: bool,
+    /// Native feature the whole tool needs. Unsupported natives do not list the tool, and
+    /// `execute_tool` refuses it before admission or its handler can send anything.
+    pub requires: Option<NativeFeature>,
+}
+
+/// Internal, host-only hints a tool emits so the claw-server audit layer can keep
+/// secrets out of the ledger. Never serialized to the client: `into_call_tool_result`
+/// does not copy it, so it rides only on the in-process `ToolResult`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuditHints {
+    /// Refs whose value must be redacted from `args_json` (matches the top-level
+    /// `ref` or a `fields[]` entry's `ref`).
+    pub sensitive_refs: Vec<String>,
+    /// Redact every `value`/`text`/`fields[].value` regardless of ref, and script
+    /// `code` at the host audit boundary. Explicit passwords are always redacted.
+    /// Set when the target has no ref or the source itself may contain secrets.
+    pub redact_all_values: bool,
+    /// Skip the audit screenshot for this dispatch.
+    pub skip_screenshot: bool,
+}
+
+impl AuditHints {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.sensitive_refs.is_empty() && !self.redact_all_values && !self.skip_screenshot
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -202,6 +417,8 @@ pub struct ToolResult {
     pub content: Vec<ContentBlock>,
     pub is_error: bool,
     pub structured_content: Option<Value>,
+    /// Host-only audit hints. Not sent to the client (see `AuditHints`).
+    pub audit_hints: Option<AuditHints>,
 }
 
 impl ToolResult {
@@ -211,6 +428,7 @@ impl ToolResult {
             content: vec![ContentBlock::text(text)],
             is_error: false,
             structured_content,
+            audit_hints: None,
         }
     }
 
@@ -220,6 +438,7 @@ impl ToolResult {
             content: vec![ContentBlock::image(data, mime_type)],
             is_error: false,
             structured_content: Some(structured),
+            audit_hints: None,
         }
     }
 
@@ -229,6 +448,7 @@ impl ToolResult {
             content: vec![ContentBlock::text(message)],
             is_error: true,
             structured_content: None,
+            audit_hints: None,
         }
     }
 
@@ -249,12 +469,16 @@ pub type ToolExecResult<T> = Result<T, ToolError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
+    #[error("tool requires a connected browser")]
+    BrowserRequired,
     #[error("cancelled")]
     Cancelled,
     #[error("invalid arguments")]
     InvalidArguments(Vec<ArgIssue>),
     #[error("{0}")]
     Message(String),
+    #[error(transparent)]
+    Core(#[from] CoreError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,12 +494,6 @@ impl ToolError {
     }
 }
 
-impl From<CoreError> for ToolError {
-    fn from(value: CoreError) -> Self {
-        Self::Message(value.to_string())
-    }
-}
-
 impl From<serde_json::Error> for ToolError {
     fn from(value: serde_json::Error) -> Self {
         Self::Message(value.to_string())
@@ -288,15 +506,142 @@ impl From<std::io::Error> for ToolError {
     }
 }
 
-pub async fn execute_tool(
+pub async fn execute_tool<'a>(
     def: &ToolDef,
+    raw_args: Value,
+    execution: impl Into<ToolExecution<'a>> + Send,
+) -> ToolExecResult<ToolResult> {
+    let execution = execution.into();
+    let handler = match def.handler {
+        ToolHandler::Output(handler) => return handler(raw_args, execution.output_files()).await,
+        ToolHandler::Browser(handler) => handler,
+    };
+    let ToolExecution::Browser(ctx) = execution else {
+        return Err(ToolError::BrowserRequired);
+    };
+    let mut call_ctx = ctx.clone();
+    if !ctx.within_script {
+        call_ctx.output_files = ctx.output_files.begin_call();
+    }
+    let mut result = execute_tool_inner(def, handler, raw_args, &call_ctx).await?;
+    if crate::tools::sensitive::is_sensitive_tool(def.name) {
+        result.audit_hints = Some(AuditHints {
+            redact_all_values: true,
+            skip_screenshot: true,
+            ..result.audit_hints.unwrap_or_default()
+        });
+    }
+    if !ctx.within_script {
+        // Nested calls keep typed parts and image captures in this request's collector.
+        // Forward actual images once, including captures a script did not return as JSON.
+        for image in call_ctx.output_files.images().await {
+            if !result.content.iter().any(|block| {
+                block
+                    .as_image()
+                    .is_some_and(|existing| existing.data == image.data)
+            }) {
+                result
+                    .content
+                    .push(ContentBlock::image(image.data, image.mime_type));
+            }
+        }
+        let omitted = call_ctx.output_files.omitted_images().await;
+        if omitted > 0 {
+            result.content.push(ContentBlock::text(format!(
+                "{omitted} additional screenshots were saved; use read_output to retrieve them."
+            )));
+        }
+        let primary = json!({ "isError": result.is_error, "structuredContent": result.structured_content, "text": result.content.iter().filter_map(|block| block.as_text().map(|text| &text.text)).collect::<Vec<_>>() });
+        match call_ctx.output_files.finish(&primary).await {
+            Ok(Some(output)) => {
+                for warning in &output.warnings {
+                    result.content.push(ContentBlock::text(warning));
+                }
+                if !output.warnings.is_empty() {
+                    merge_structured(
+                        &mut result.structured_content,
+                        json!({ "outputWriteFailed": true }),
+                    );
+                }
+                result.content.push(ContentBlock::text(format!("[Saved output: {}. Use read_output with outputId and part; omit part to list parts.]", output.id)));
+                merge_structured(&mut result.structured_content, json!({ "output": output }));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                // The browser action may already have committed. Report incomplete output
+                // explicitly without relabelling a successful action as safe to retry.
+                result.content.push(ContentBlock::text(format!(
+                    "Could not publish complete saved output: {error}"
+                )));
+                merge_structured(
+                    &mut result.structured_content,
+                    json!({ "outputWriteFailed": true }),
+                );
+            }
+        }
+    }
+    Ok(result)
+}
+
+async fn execute_tool_inner(
+    def: &ToolDef,
+    handler: BrowserToolHandler,
     raw_args: Value,
     ctx: &ToolCtx,
 ) -> ToolExecResult<ToolResult> {
     ctx.throw_if_cancelled()?;
+    // First, before admission or the handler: this is the authority for a hidden tool that a
+    // client still calls from a cached list, by name, or as run's `tool:*` primitive.
+    if let Some(feature) = def.metadata.requires
+        && let Err(err) = ctx.browser.require(feature)
+    {
+        return Ok(ToolResult::error(format!("{} failed: {err}", def.name)));
+    }
     let primary_page = extract_page_id(def.metadata.accepts_page_arg, &raw_args).map(PageId);
+    // Reject before invoking a handler or exposing page signals. Management is
+    // intentionally admitted even when the captured profile or strict pin is gone.
+    if !def.metadata.manages_target {
+        if let Some(err) = ctx.browser.admission_error() {
+            return Ok(ToolResult::error(format!("{} failed: {err}", def.name)));
+        }
+        if let Some(page) = &primary_page
+            && let Err(err) = ctx.browser.page(page.clone()).await
+        {
+            return Ok(ToolResult::error(format!("{} failed: {err}", def.name)));
+        }
+    }
+    ctx.throw_if_cancelled()?;
+    // Acquisition stays inside the caller's execution future: queued cancellation
+    // and the run's existing deadline drop it without publishing handler work. Keep
+    // the owned guard through all response readbacks; BrowserView remains the scope
+    // authority and each handler's native operations re-admit after this wait.
+    let tool_guard = if let Some(hook) = &ctx.inner_call_hook {
+        tokio::select! {
+            biased;
+            () = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+            guard = hook.acquire_tool_guard(def.name, &raw_args) => guard.map_err(ToolError::message)?,
+        }
+    } else {
+        None
+    };
+    ctx.throw_if_cancelled()?;
+    // A tab in a fixed viewport gets back a mode it lost before the tool reads or acts, and is
+    // held until the readback is done. setViewport applies its own; tab management needs none.
+    let viewport = match &primary_page {
+        Some(page) if restores_viewport(def.name) => {
+            tokio::select! {
+                biased;
+                () = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+                lease = ctx.browser.prepare_viewport(page.clone()) => match lease {
+                    Ok(lease) => Some(lease),
+                    Err(err) => return Ok(ToolResult::error(format!("{} failed: {err}", def.name))),
+                },
+            }
+        }
+        _ => None,
+    };
     let mut response = ToolResponse::new();
-    match (def.handler)(raw_args, ctx, &mut response).await {
+    match handler(raw_args, ctx, &mut response).await {
         Ok(Some(result)) => response.append_result(result),
         Ok(None) => {}
         Err(ToolError::InvalidArguments(issues)) => {
@@ -305,26 +650,104 @@ pub async fn execute_tool(
             )));
         }
         Err(ToolError::Cancelled) => return Err(ToolError::Cancelled),
-        Err(err) => response.error(format!("{} failed: {err}", def.name)),
+        Err(err) => {
+            // Preserve actionable click recovery in structured MCP output as
+            // well as text. The SDK bridge carries the same ref in its exception.
+            if let ToolError::Core(error) = &err {
+                let preparation = match error {
+                    CoreError::ClickFallbackUnavailable { native, .. } => native.as_ref(),
+                    other => other,
+                };
+                match preparation {
+                    CoreError::ElementCovered {
+                        blocker,
+                        blocker_ref,
+                        ..
+                    } => {
+                        response.click_data(json!({ "status": "blocked", "sent": false,
+                            "blocker": { "description": blocker, "ref": blocker_ref } }));
+                    }
+                    CoreError::ClickOutcomeUnknown(_) => {
+                        response.click_data(json!({ "status": "unknown", "retryable": false }));
+                    }
+                    _ => {}
+                }
+            }
+            response.error(format!("{} failed: {err}", def.name));
+        }
     }
     ctx.throw_if_cancelled()?;
     let mut result = response.build_for_session(ctx, primary_page).await?;
     ctx.throw_if_cancelled()?;
 
     if let Some(page_id) = structured_page_id(result.structured_content.as_ref())
-        && let Some(tab_id) = ctx.session.pages.get_tab_id(PageId(page_id)).await
+        && let Some(tab_id) = ctx.browser.tab_id_of(PageId(page_id)).await
     {
         result.metadata_tab_id = Some(tab_id.0);
     }
-    Ok(result.into_tool_result())
+    let result = result.into_tool_result();
+    // The script bridge records its child audit only after execute_tool returns.
+    // Releasing here prevents host audit work from retaining an operation lock.
+    drop(viewport);
+    drop(tool_guard);
+    Ok(result)
+}
+
+fn restores_viewport(tool: &str) -> bool {
+    !matches!(tool, "tabs" | tools::viewport::NAME)
 }
 
 #[must_use]
 pub fn pending_dialog_result(ctx: &ToolCtx, page: PageId) -> Option<ToolResult> {
-    ctx.session
-        .page_signals
+    ctx.browser
+        .signals()
         .pending_dialog_line(&page)
         .map(ToolResult::error)
+}
+
+/// A chooser is recoverable selection state shared by granular tools and run. The node and
+/// CDP session stay in core; agents receive only the action needed to finish selecting files.
+pub async fn pending_file_chooser_result(
+    ctx: &ToolCtx,
+    page: PageId,
+    wait_for_event: bool,
+) -> ToolExecResult<Option<ToolResult>> {
+    let files = ctx.browser.files();
+    // Only native activation actions need the UI-thread handoff window. Ordinary input
+    // still reports an already-pending chooser without adding latency to script loops.
+    let chooser = if wait_for_event {
+        files.chooser_after_action(page.clone()).await?
+    } else {
+        files.pending_chooser(page.clone()).await?
+    };
+    let Some(chooser) = chooser else {
+        return Ok(None);
+    };
+    Ok(Some(text_result(
+        format!(
+            "{{\"fileChooserOpen\":true,\"multiple\":{}}}\nA file chooser is open; call upload with file/files and omit ref to select files, or files=[] to clear it.",
+            chooser.multiple
+        ),
+        Some(serde_json::json!({"page":page.0,"fileChooserOpen":true,"multiple":chooser.multiple})),
+    )))
+}
+
+/// One line a host appends to an outer tool result while a saved profile target is not
+/// applied (see `BrowserView::capture`). It reports routing only; it never gates anything.
+#[must_use]
+pub fn unapplied_target_note(view: &BrowserView) -> Option<String> {
+    let binding = view.unapplied_binding()?;
+    let feature = NativeFeature::ProfileTargeting;
+    let reported = match view.native().browseros_version() {
+        Some(version) => format!("this browser reports BrowserOS {version}"),
+        None => "this browser's BrowserOS version is unknown".to_string(),
+    };
+    Some(format!(
+        "Note: saved profile target \"{}\" ({}) was not applied: {feature} needs BrowserOS {} or newer and {reported}. This call used browser-wide routing.",
+        binding.intent.name,
+        binding.intent.browser_profile_id,
+        feature.min_browseros(),
+    ))
 }
 
 #[must_use]
@@ -447,6 +870,8 @@ fn normalize_schema_value(value: &mut Value) {
                 object.remove("default");
             }
 
+            collapse_nullable_enum(object);
+
             for key in [
                 "additionalItems",
                 "additionalProperties",
@@ -489,6 +914,57 @@ fn normalize_schema_value(value: &mut Value) {
             }
         }
         _ => {}
+    }
+}
+
+/// Rewrites a nullable enum — `{"type": ["string", "null"], "enum": [..., null]}`, which is
+/// what schemars emits for an `Option<SomeEnum>` field — into the plain single-type form.
+///
+/// An optional argument is already optional by being absent from `required`, and the extra
+/// `null` is what strict MCP clients reject: a Pydantic-backed client decodes every `enum`
+/// entry as the declared type and fails the tool list outright on the trailing `None`.
+/// Arguments are deserialized with serde rather than validated against this schema, so
+/// dropping it changes what clients are told, not what the server accepts.
+fn collapse_nullable_enum(object: &mut JsonObject) {
+    let Some(Value::Array(values)) = object.get("enum") else {
+        return;
+    };
+    if !values.iter().any(Value::is_null) {
+        return;
+    }
+    let kept_values: Vec<Value> = values
+        .iter()
+        .filter(|value| !value.is_null())
+        .cloned()
+        .collect();
+    // An enum of nothing but `null` carries no variants to keep; leave it untouched.
+    if kept_values.is_empty() {
+        return;
+    }
+
+    // A strict client rejects a `null` enum entry whatever the `type` says, so the
+    // `null` is dropped from any enum that has one. When `type` is the
+    // `["<type>", "null"]` array schemars emits for an Option, collapse it in the
+    // same pass; a scalar or missing type is left as-is.
+    let type_replacement = match object.get("type") {
+        Some(Value::Array(types)) => {
+            let kept_types: Vec<Value> = types
+                .iter()
+                .filter(|entry| entry.as_str() != Some("null"))
+                .cloned()
+                .collect();
+            match kept_types.as_slice() {
+                [] => None,
+                [single] => Some(single.clone()),
+                _ => Some(Value::Array(kept_types)),
+            }
+        }
+        _ => None,
+    };
+
+    object.insert("enum".to_string(), Value::Array(kept_values));
+    if let Some(replacement) = type_replacement {
+        object.insert("type".to_string(), replacement);
     }
 }
 
@@ -605,6 +1081,74 @@ pub fn page_json(page: &browseros_core::pages::PageInfo) -> Value {
         if let Some(group_id) = &page.group_id {
             object.insert("groupId".to_string(), json!(group_id));
         }
+        if let Some(profile_id) = &page.browser_profile_id {
+            object.insert("browserProfileId".to_string(), json!(profile_id));
+        }
     }
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn normalized(schema: Value) -> Value {
+        let Value::Object(object) = schema else {
+            panic!("test schema should be an object");
+        };
+        Value::Object((*normalize_schema_object(object)).clone())
+    }
+
+    #[test]
+    fn nullable_enum_normalization_collapses_schemars_option_enum_shape() {
+        let schema = normalized(json!({
+            "type": "object",
+            "properties": {
+                "button": {
+                    "type": ["string", "null"],
+                    "enum": ["left", "right", null]
+                }
+            }
+        }));
+
+        assert_eq!(
+            schema.pointer("/properties/button"),
+            Some(&json!({
+                "type": "string",
+                "enum": ["left", "right"]
+            }))
+        );
+    }
+
+    #[test]
+    fn nullable_enum_normalization_strips_null_even_without_the_nullable_type_array() {
+        // A strict client rejects a `null` enum entry whatever `type` says, so the
+        // `null` is dropped whether `type` is a scalar string or absent; only the
+        // `["<type>", "null"]` array is additionally collapsed.
+        let schema = normalized(json!({
+            "type": "object",
+            "properties": {
+                "state": {
+                    "type": "string",
+                    "enum": ["ready", null]
+                },
+                "implicit": {
+                    "enum": ["ready", null]
+                }
+            }
+        }));
+
+        assert_eq!(
+            schema.pointer("/properties/state/enum"),
+            Some(&json!(["ready"]))
+        );
+        assert_eq!(
+            schema.pointer("/properties/state/type"),
+            Some(&json!("string"))
+        );
+        assert_eq!(
+            schema.pointer("/properties/implicit/enum"),
+            Some(&json!(["ready"]))
+        );
+    }
 }

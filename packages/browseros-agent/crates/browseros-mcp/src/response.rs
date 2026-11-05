@@ -4,19 +4,57 @@
 
 use crate::{
     constants::TOOL_POST_ACTION_CAPTURE_TIMEOUT,
-    format::{diff::format_diff_result, snapshot::format_snapshot_result},
-    framework::{ToolCtx, ToolError, ToolExecResult, ToolResult, merge_structured},
+    format::{
+        coverage::insert_coverage,
+        diff::{DiffDetail, format_diff_result},
+        snapshot::format_snapshot_result,
+    },
+    framework::{AuditHints, ToolCtx, ToolError, ToolExecResult, ToolResult, merge_structured},
+    trust_boundary::wrap_untrusted,
 };
-use browseros_core::{ConsoleEntry, PageId, settle::SettleOutcome};
+use browseros_core::{
+    ConsoleEntry, DocumentMark, FrameId, PageId, Ref, observer::SnapshotResult, pointer,
+    settle::SettleOutcome,
+};
 use rmcp::model::ContentBlock;
 use serde_json::{Value, json};
+use std::collections::{HashMap, hash_map::Entry};
 
 #[derive(Debug, Clone)]
 enum PostAction {
-    Snapshot { page: u32 },
-    Diff { page: u32, include_structured: bool },
+    Snapshot {
+        page: u32,
+    },
+    Diff {
+        page: u32,
+        include_structured: bool,
+        detail: DiffDetail,
+        /// Taken before the action ran, so the settle can tell a navigation it caused from
+        /// an earlier one.
+        since: DocumentMark,
+    },
     Pages,
-    Screenshot { page: u32 },
+    Screenshot {
+        page: u32,
+    },
+    /// The lines a snapshot shows for fields an action just filled. Fill types the value and
+    /// leaves judging the result to the caller, so this is how the caller sees what the page
+    /// made of it: kept, reformatted ("440 212"), or rejected.
+    Fields {
+        page: u32,
+        fields: Vec<FieldTarget>,
+        since: DocumentMark,
+    },
+}
+
+/// A filled field: the ref the caller used, and the DOM node that ref named once the fill
+/// resolved it. The readback finds the field by that node.
+#[derive(Debug, Clone)]
+pub struct FieldTarget {
+    pub ref_id: Ref,
+    /// `None` when the ref named nothing the page knew at fill time.
+    pub node: Option<i64>,
+    pub frame: Option<FrameId>,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +70,11 @@ pub struct ToolResponse {
     structured_content: Option<Value>,
     post_actions: Vec<PostAction>,
     console_summaries: Vec<ConsoleSummary>,
+    audit_hints: Option<AuditHints>,
+    /// The full capture a snapshot or diff post-action took of each page during this build. A
+    /// later fields post-action reads that same capture, never the observer's shared latest one,
+    /// which another call on the page may have replaced since.
+    captures: HashMap<u32, SnapshotResult>,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +83,7 @@ pub struct BuiltToolResponse {
     pub is_error: bool,
     pub structured_content: Option<Value>,
     pub metadata_tab_id: Option<i64>,
+    pub audit_hints: Option<AuditHints>,
 }
 
 impl ToolResponse {
@@ -65,6 +109,36 @@ impl ToolResponse {
         merge_structured(&mut self.structured_content, value);
     }
 
+    /// Delivery is collected before an action can lose its acknowledgement.
+    /// Later error decoration must preserve that path while updating its status.
+    pub fn click_data(&mut self, value: Value) {
+        let mut click = self
+            .structured_content
+            .as_ref()
+            .and_then(|data| data.get("click"))
+            .cloned();
+        merge_structured(&mut click, value);
+        self.data(json!({"click": click}));
+    }
+
+    /// Automatic readbacks are additional parts of the primary result. Keep their
+    /// metadata in order rather than overwriting the action's fields or earlier pages.
+    fn context_data(&mut self, page: u32, kind: &str, data: Value) {
+        let structured = self.structured_content.get_or_insert_with(|| json!({}));
+        if let Some(object) = structured.as_object_mut() {
+            let contexts = object.entry("contexts").or_insert_with(|| json!([]));
+            if let Some(contexts) = contexts.as_array_mut() {
+                contexts.push(json!({ "page": page, "kind": kind, "data": data }));
+            }
+        }
+    }
+
+    /// Record host-only audit hints (secret redaction, screenshot suppression) for
+    /// this dispatch. Carried to the claw-server audit layer, never to the client.
+    pub fn set_audit_hints(&mut self, hints: AuditHints) {
+        self.audit_hints = Some(hints);
+    }
+
     pub fn append_result(&mut self, result: ToolResult) {
         self.content.extend(result.content);
         if result.is_error {
@@ -73,16 +147,41 @@ impl ToolResponse {
         if let Some(structured) = result.structured_content {
             self.data(structured);
         }
+        if result.audit_hints.is_some() {
+            self.audit_hints = result.audit_hints;
+        }
     }
 
+    /// Appends the page's snapshot without settling first: callers return only after the page
+    /// was already found ready (goto, history and tab creation wait for readiness), and a
+    /// second wait was measured adding 300-600 ms to every `navigate` for nothing.
     pub fn include_snapshot(&mut self, page: u32) {
         self.post_actions.push(PostAction::Snapshot { page });
     }
 
-    pub fn include_diff(&mut self, page: u32, include_structured: bool) {
+    /// Appends what changed on the page, once the action that started at `since` has landed.
+    pub fn include_diff(
+        &mut self,
+        page: u32,
+        include_structured: bool,
+        detail: DiffDetail,
+        since: DocumentMark,
+    ) {
         self.post_actions.push(PostAction::Diff {
             page,
             include_structured,
+            detail,
+            since,
+        });
+    }
+
+    /// Register after any diff of the same page, so the fields read the diff's capture. Without
+    /// one, they settle from `since` first, so a page script's reformatting has landed.
+    pub fn include_fields(&mut self, page: u32, fields: Vec<FieldTarget>, since: DocumentMark) {
+        self.post_actions.push(PostAction::Fields {
+            page,
+            fields,
+            since,
         });
     }
 
@@ -138,15 +237,18 @@ impl ToolResponse {
         }
 
         for summary in self.console_summaries.clone() {
-            self.append_console_summary(ctx, summary);
+            if ctx.browser.page(PageId(summary.page)).await.is_ok() {
+                self.append_console_summary(ctx, summary);
+            }
         }
-        self.prepend_page_signal_lines(ctx, primary_page);
+        self.prepend_page_signal_lines(ctx, primary_page).await;
 
         Ok(BuiltToolResponse {
             content: self.content.clone(),
             is_error: self.has_error,
             structured_content: self.structured_content.clone(),
             metadata_tab_id: None,
+            audit_hints: self.audit_hints.clone(),
         })
     }
 
@@ -155,41 +257,63 @@ impl ToolResponse {
         action: PostAction,
         ctx: &ToolCtx,
     ) -> ToolExecResult<()> {
+        // Settling is advisory and can stop on an admission error. Re-admit
+        // before reading global dialog signals or starting the actual readback.
+        if ctx.browser.binding().is_some()
+            && let Some(page) = action.page()
+        {
+            ctx.browser.page(PageId(page)).await?;
+        }
         match action {
             PostAction::Snapshot { page } => {
                 self.throw_if_dialog_open(ctx, page)?;
-                let observer = ctx.session.observe(browseros_core::PageId(page)).await;
+                let observer = ctx.browser.observe(browseros_core::PageId(page)).await?;
                 let snapshot = observer.snapshot().await?;
-                let formatted = format_snapshot_result(&snapshot.text, &snapshot.url, ctx).await;
+                let formatted =
+                    format_snapshot_result(&snapshot.text, &snapshot.coverage, &snapshot.url, ctx)
+                        .await;
                 self.text(format!("[Page {page} snapshot]\n{}", formatted.text));
+                self.context_data(page, "snapshot", formatted.structured);
+                self.captures.insert(page, snapshot);
                 Ok(())
             }
             PostAction::Diff {
                 page,
                 include_structured,
+                detail,
+                ..
             } => {
                 self.throw_if_dialog_open(ctx, page)?;
-                let diff = ctx
-                    .session
+                let (diff, capture) = ctx
+                    .browser
                     .observe(browseros_core::PageId(page))
-                    .await
-                    .diff()
+                    .await?
+                    .diff_with_capture()
                     .await?;
+                self.captures.insert(page, capture);
                 let origin = diff.after_url.as_deref().map(ToString::to_string);
                 let origin = match origin {
                     Some(origin) => origin,
                     None => ctx
-                        .session
-                        .pages
-                        .get_info(browseros_core::PageId(page))
-                        .await
+                        .browser
+                        .refresh_page(browseros_core::PageId(page))
+                        .await?
                         .map(|info| info.url)
                         .unwrap_or_else(|| "unknown".to_string()),
                 };
-                let formatted = format_diff_result(&diff, &origin, ctx).await;
+                let formatted = format_diff_result(&diff, &origin, ctx, detail).await;
                 self.text(format!("[Page {page} diff]\n{}", formatted.text));
+                self.context_data(page, "diff", formatted.structured);
                 if include_structured {
                     let mut structured = json!({ "changed": diff.changed });
+                    // Text changing and the page changing are different
+                    // questions on a page carrying a countdown or a carousel,
+                    // so say which one this was.
+                    if let Some(moved) = diff.arrangement_changed
+                        && let Value::Object(object) = &mut structured
+                    {
+                        object.insert("arrangementChanged".to_string(), Value::Bool(moved));
+                    }
                     if diff.url_changed
                         && let Value::Object(object) = &mut structured
                     {
@@ -203,12 +327,51 @@ impl ToolResponse {
                             diff.after_url.map(Value::String).unwrap_or(Value::Null),
                         );
                     }
+                    // The action's own success is the tool result; this says only how much of
+                    // the page its follow-up capture could read.
+                    insert_coverage(&mut structured, &diff.coverage, &diff.uncompared);
                     self.data(structured);
                 }
                 Ok(())
             }
+            PostAction::Fields { page, fields, .. } => {
+                self.throw_if_dialog_open(ctx, page)?;
+                // Without a capture from this build, the observer's last one may predate the fill.
+                let capture = match self.captures.entry(page) {
+                    Entry::Occupied(entry) => entry.into_mut(),
+                    Entry::Vacant(entry) => entry.insert(
+                        ctx.browser
+                            .observe(browseros_core::PageId(page))
+                            .await?
+                            .snapshot()
+                            .await?,
+                    ),
+                };
+                // A field whose ref changed (the page re-rendered it before the fill) shows the
+                // ref it carries now, after the one the caller used.
+                let text = fields
+                    .iter()
+                    .map(|field| {
+                        let shown = field
+                            .node
+                            .and_then(|node| capture.line_for(node, field.frame.as_ref()));
+                        match shown {
+                            Some((now, line)) if *now == field.ref_id => line.to_string(),
+                            Some((_, line)) => format!("{} → {line}", field.ref_id),
+                            None if capture.may_lack_frame(field.frame.as_ref()) => {
+                                format!("{}: unknown, its frame could not be read", field.ref_id)
+                            }
+                            None => format!("{}: not on the page now", field.ref_id),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let wrapped = wrap_untrusted(&text, &capture.url);
+                self.text(format!("[Page {page} fields]\n{wrapped}"));
+                Ok(())
+            }
             PostAction::Pages => {
-                let pages = ctx.session.pages.list().await?;
+                let pages = ctx.browser.list_pages().await?.pages;
                 if pages.is_empty() {
                     self.text("[Open pages] None");
                     return Ok(());
@@ -234,21 +397,35 @@ impl ToolResponse {
             }
             PostAction::Screenshot { page } => {
                 let page_session = ctx
-                    .session
-                    .pages
-                    .get_session(browseros_core::PageId(page))
+                    .browser
+                    .page_session(browseros_core::PageId(page))
                     .await?;
                 #[derive(serde::Deserialize)]
                 struct CaptureScreenshotResult {
                     data: String,
                 }
-                let result: CaptureScreenshotResult = page_session
+                let hidden = pointer::hide_for_capture(&page_session.session).await;
+                let result = page_session
                     .session
-                    .send(
+                    .send::<_, CaptureScreenshotResult>(
                         "Page.captureScreenshot",
                         json!({ "format": "png", "captureBeyondViewport": false }),
                     )
-                    .await?;
+                    .await;
+                if hidden {
+                    pointer::restore_after_capture(&page_session.session).await;
+                }
+                let result = result?;
+                if let Err(error) = ctx
+                    .output_files
+                    .image(&result.data, "image/png", &json!({ "page": page }))
+                    .await
+                {
+                    self.text(format!(
+                        "Screenshot captured, but could not retain its output: {error}"
+                    ));
+                    self.data(json!({ "outputWriteFailed": true }));
+                }
                 self.text(format!("[Page {page} screenshot]"));
                 self.image(result.data, "image/png");
                 Ok(())
@@ -261,12 +438,16 @@ impl ToolResponse {
         action: &PostAction,
         ctx: &ToolCtx,
     ) -> ToolExecResult<()> {
-        let Some(page) = action.settle_page() else {
+        let Some((page, since)) = action.settle_target() else {
             return Ok(());
         };
+        // Fields reuse a capture this response already took, and the page settled for that one.
+        if matches!(action, PostAction::Fields { .. }) && self.captures.contains_key(&page) {
+            return Ok(());
+        }
         if ctx
-            .session
-            .page_signals
+            .browser
+            .signals()
             .pending_dialog_line(&PageId(page))
             .is_some()
         {
@@ -275,10 +456,10 @@ impl ToolResponse {
         }
         let outcome = tokio::select! {
             () = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-            outcome = browseros_core::settle::wait_for_action_settle(
-                ctx.session.pages.as_ref(),
+            outcome = crate::settle::wait_for_action_settle(
+                &ctx.browser,
                 PageId(page),
-                browseros_core::timeouts::ACTION_SETTLE_DEFAULT_TIMEOUT,
+                since,
             ) => outcome,
         };
         match outcome {
@@ -295,8 +476,8 @@ impl ToolResponse {
 
     fn append_console_summary(&mut self, ctx: &ToolCtx, summary: ConsoleSummary) {
         let entries = ctx
-            .session
-            .page_signals
+            .browser
+            .signals()
             .console_entries_since(&PageId(summary.page), summary.since);
         let Some(line) = console_summary_line(summary.page, &entries) else {
             return;
@@ -304,7 +485,7 @@ impl ToolResponse {
         self.text(line);
     }
 
-    fn prepend_page_signal_lines(&mut self, ctx: &ToolCtx, primary_page: Option<PageId>) {
+    async fn prepend_page_signal_lines(&mut self, ctx: &ToolCtx, primary_page: Option<PageId>) {
         let mut pages = Vec::new();
         if let Some(page) = primary_page {
             push_page_once(&mut pages, page);
@@ -320,8 +501,13 @@ impl ToolResponse {
 
         let mut lines = Vec::new();
         for page in pages {
-            lines.extend(ctx.session.page_signals.take_alert_note_lines(&page));
-            if let Some(line) = ctx.session.page_signals.pending_dialog_line(&page) {
+            // A page may have moved while the action/readback awaited. Signals
+            // come from the global registry, so admit again before exposing them.
+            if ctx.browser.page(page.clone()).await.is_err() {
+                continue;
+            }
+            lines.extend(ctx.browser.signals().take_alert_note_lines(&page));
+            if let Some(line) = ctx.browser.signals().pending_dialog_line(&page) {
                 lines.push(line);
             }
         }
@@ -359,7 +545,7 @@ impl ToolResponse {
     }
 
     fn throw_if_dialog_open(&self, ctx: &ToolCtx, page: u32) -> ToolExecResult<()> {
-        match ctx.session.page_signals.pending_dialog_line(&PageId(page)) {
+        match ctx.browser.signals().pending_dialog_line(&PageId(page)) {
             Some(message) => Err(ToolError::message(message)),
             None => Ok(()),
         }
@@ -374,23 +560,28 @@ impl BuiltToolResponse {
             content: self.content,
             is_error: self.is_error,
             structured_content: self.structured_content,
+            audit_hints: self.audit_hints,
         }
     }
 }
 
 impl PostAction {
-    fn settle_page(&self) -> Option<u32> {
+    /// The page to settle before this post-action reads it, and the mark its action started at.
+    fn settle_target(&self) -> Option<(u32, DocumentMark)> {
         match self {
-            Self::Snapshot { page } | Self::Diff { page, .. } => Some(*page),
-            Self::Pages | Self::Screenshot { .. } => None,
+            Self::Diff { page, since, .. } | Self::Fields { page, since, .. } => {
+                Some((*page, *since))
+            }
+            Self::Snapshot { .. } | Self::Pages | Self::Screenshot { .. } => None,
         }
     }
 
     fn page(&self) -> Option<u32> {
         match self {
-            Self::Snapshot { page } | Self::Diff { page, .. } | Self::Screenshot { page } => {
-                Some(*page)
-            }
+            Self::Snapshot { page }
+            | Self::Diff { page, .. }
+            | Self::Screenshot { page }
+            | Self::Fields { page, .. } => Some(*page),
             Self::Pages => None,
         }
     }
@@ -402,6 +593,7 @@ impl PostAction {
             Self::Diff { page, .. } => format!("[page {page} diff unavailable: {reason}]"),
             Self::Pages => format!("[pages unavailable: {reason}]"),
             Self::Screenshot { page } => format!("[page {page} screenshot unavailable: {reason}]"),
+            Self::Fields { page, .. } => format!("[page {page} fields unavailable: {reason}]"),
         }
     }
 }
@@ -425,4 +617,258 @@ fn console_summary_line(page: u32, entries: &[ConsoleEntry]) -> Option<String> {
         entries.len(),
         first.summary_text()
     ))
+}
+
+#[cfg(test)]
+mod pointer_capture_tests {
+    use super::{PostAction, ToolResponse};
+    use crate::{
+        framework::{BrowserToolDefaults, BrowserToolOptions, ToolCtx},
+        output_file::create_browser_output_file_access,
+    };
+    use browseros_cdp::{CdpError, CdpEvent};
+    use browseros_core::{
+        Browser, CdpConnection, PageId, SessionId,
+        screenshot::{ScreenshotCaptureOptions, ScreenshotFormat},
+    };
+    use futures_util::future::BoxFuture;
+    use serde_json::{Value, json};
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::broadcast;
+    use tokio_util::sync::CancellationToken;
+
+    #[derive(Clone, Copy, Debug)]
+    enum CapturePath {
+        Plain,
+        Annotated,
+        Browser,
+        PostAction,
+    }
+    const PATHS: [CapturePath; 4] = [
+        CapturePath::Plain,
+        CapturePath::Annotated,
+        CapturePath::Browser,
+        CapturePath::PostAction,
+    ];
+
+    struct CaptureConnection {
+        calls: Mutex<Vec<(String, Value)>>,
+        events: broadcast::Sender<CdpEvent>,
+        fail_hide: bool,
+        fail_capture: bool,
+    }
+
+    impl CaptureConnection {
+        fn new(fail_hide: bool, fail_capture: bool) -> Arc<Self> {
+            let (events, _) = broadcast::channel(8);
+            Arc::new(Self {
+                calls: Mutex::new(Vec::new()),
+                events,
+                fail_hide,
+                fail_capture,
+            })
+        }
+
+        fn capture_calls(&self) -> Vec<String> {
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .filter_map(|(method, params)| {
+                    let expression = params["expression"].as_str().unwrap_or_default();
+                    if method == "Page.captureScreenshot" {
+                        Some("capture".to_string())
+                    } else if expression.contains("p.hide()") {
+                        Some("hide".to_string())
+                    } else if expression.contains("p.show()") {
+                        Some("show".to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+
+        fn tab() -> Value {
+            json!({ "tabId": 101, "targetId": "target-1", "url": "https://example.test/", "title": "Example", "isActive": true,
+                "isLoading": false, "loadProgress": 1.0, "isPinned": false, "isHidden": false, "windowId": 1, "index": 0 })
+        }
+    }
+
+    impl CdpConnection for CaptureConnection {
+        fn send<'a>(
+            &'a self,
+            method: &'a str,
+            params: Value,
+            _session: Option<&'a SessionId>,
+        ) -> BoxFuture<'a, Result<Value, CdpError>> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push((method.to_string(), params.clone()));
+                match method {
+                    "Browser.getTabs" => Ok(json!({ "tabs": [Self::tab()] })),
+                    "Browser.getTabInfo" => Ok(json!({ "tab": Self::tab() })),
+                    "Target.attachToTarget" => Ok(json!({ "sessionId": "session-1" })),
+                    "Page.getFrameTree" => Ok(
+                        json!({ "frameTree": { "frame": { "id": "main", "loaderId": "loader-1", "url": "https://example.test/" } } }),
+                    ),
+                    "Accessibility.getFullAXTree" => Ok(json!({ "nodes": [] })),
+                    "Page.captureScreenshot" if self.fail_capture => {
+                        Err(CdpError::Transport("capture failed".into()))
+                    }
+                    "Page.captureScreenshot" => Ok(json!({ "data": "cG5n" })),
+                    "Runtime.evaluate"
+                        if self.fail_hide
+                            && params["expression"]
+                                .as_str()
+                                .is_some_and(|js| js.contains("p.hide()")) =>
+                    {
+                        Err(CdpError::Transport("hide failed".into()))
+                    }
+                    "Runtime.evaluate" => Ok(json!({ "result": { "value": true } })),
+                    "Page.enable"
+                    | "DOM.enable"
+                    | "Runtime.enable"
+                    | "Accessibility.enable"
+                    | "Runtime.runIfWaitingForDebugger"
+                    | "Target.setAutoAttach"
+                    | "Runtime.releaseObjectGroup" => Ok(json!({})),
+                    _ => Err(CdpError::Transport(format!(
+                        "unexpected capture fixture call: {method}"
+                    ))),
+                }
+            })
+        }
+
+        fn send_raw_json<'a>(
+            &'a self,
+            method: &'a str,
+            params: &'a str,
+            session: Option<&'a SessionId>,
+        ) -> BoxFuture<'a, Result<String, CdpError>> {
+            Box::pin(async move {
+                Ok(self
+                    .send(method, serde_json::from_str(params)?, session)
+                    .await?
+                    .to_string())
+            })
+        }
+
+        fn send_at_epoch<'a>(
+            &'a self,
+            expected_epoch: u64,
+            method: &'a str,
+            params: Value,
+            session: Option<&'a SessionId>,
+        ) -> BoxFuture<'a, Result<Value, CdpError>> {
+            Box::pin(async move {
+                if expected_epoch != 1 {
+                    return Err(CdpError::ConnectionEpochChanged {
+                        expected: expected_epoch,
+                        actual: 1,
+                    });
+                }
+                self.send(method, params, session).await
+            })
+        }
+
+        fn events(&self) -> broadcast::Receiver<CdpEvent> {
+            self.events.subscribe()
+        }
+        fn is_connected(&self) -> bool {
+            true
+        }
+        fn connection_epoch(&self) -> u64 {
+            1
+        }
+    }
+
+    async fn capture(path: CapturePath, connection: Arc<CaptureConnection>) -> anyhow::Result<()> {
+        let browser = Browser::new(connection);
+        browser.list_pages().await?;
+        match path {
+            CapturePath::Browser => {
+                let capture = browser
+                    .screenshot(PageId(1), ScreenshotFormat::Png, None, false)
+                    .await?;
+                assert_eq!(capture.data, "cG5n");
+            }
+            CapturePath::Plain | CapturePath::Annotated => {
+                let capture = browser
+                    .view()
+                    .await
+                    .screenshot(
+                        PageId(1),
+                        ScreenshotCaptureOptions {
+                            annotate: Some(matches!(path, CapturePath::Annotated)),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                assert_eq!(capture.data, "cG5n");
+                assert!(capture.annotations.is_empty());
+            }
+            CapturePath::PostAction => {
+                let ctx = ToolCtx::new(BrowserToolOptions {
+                    browser: browser.view().await,
+                    target: None,
+                    defaults: BrowserToolDefaults::default(),
+                    cancel: CancellationToken::new(),
+                    output_files: create_browser_output_file_access(),
+                    inner_call_hook: None,
+                    preloaded_helpers: Vec::new(),
+                });
+                let mut response = ToolResponse::new();
+                response
+                    .run_session_post_action(PostAction::Screenshot { page: 1 }, &ctx)
+                    .await?;
+                assert_eq!(response.content.len(), 2);
+                assert!(serde_json::to_string(&response.content)?.contains("cG5n"));
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tests_that_every_capture_hides_then_restores_the_pointer() -> anyhow::Result<()> {
+        for path in PATHS {
+            let connection = CaptureConnection::new(false, false);
+            capture(path, connection.clone()).await?;
+            assert_eq!(
+                connection.capture_calls(),
+                ["hide", "capture", "show"],
+                "{path:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tests_that_every_capture_restores_the_pointer_on_capture_failure() {
+        for path in PATHS {
+            let connection = CaptureConnection::new(false, true);
+            let error = capture(path, connection.clone()).await.err();
+            assert!(
+                error.is_some_and(|error| error.to_string().contains("capture failed")),
+                "{path:?}"
+            );
+            assert_eq!(
+                connection.capture_calls(),
+                ["hide", "capture", "show"],
+                "{path:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tests_that_every_capture_survives_a_failed_pointer_hide() -> anyhow::Result<()> {
+        for path in PATHS {
+            let connection = CaptureConnection::new(true, false);
+            capture(path, connection.clone()).await?;
+            assert_eq!(connection.capture_calls(), ["hide", "capture"], "{path:?}");
+        }
+        Ok(())
+    }
 }
